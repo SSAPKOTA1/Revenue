@@ -48,26 +48,214 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Inline CSS (avoids Windows file encoding issues) ──────────────────────
+# ── Global CSS ─────────────────────────────────────────────────────────────
 st.markdown("""<style>
-[data-testid="stAppViewContainer"] { background: #0f1117; }
-[data-testid="stSidebar"] { background: #1a1f2e; }
-h1,h2,h3,h4 { color: #e2e8f0; }
-.main-header { padding: 1rem 0 0.5rem; border-bottom: 1px solid #2d3748; margin-bottom: 1rem; }
-.main-header h1 { font-size: 1.8rem; color: #60a5fa; margin: 0; }
-.main-header p  { color: #94a3b8; margin: 0; font-size: 0.85rem; }
-.kpi-card { background: #1e2a3a; border-radius: 8px; padding: 1rem 1.2rem;
-            border-left: 3px solid #3b82f6; margin-bottom: 0.5rem; }
-.kpi-value { font-size: 1.6rem; font-weight: 700; color: #60a5fa; }
-.kpi-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; }
+/* ── Base ── */
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"],
+.main { background: #080d18 !important; }
+
+[data-testid="stSidebar"] {
+    background: #0e1422 !important;
+    border-right: 1px solid rgba(255,255,255,0.05) !important;
+}
+[data-testid="stSidebarContent"] { padding: 1.2rem 1rem !important; }
+
+/* ── Typography ── */
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+h1 { color: #f1f5f9 !important; font-weight: 800 !important; letter-spacing: -0.02em !important; }
+h2 { color: #e2e8f0 !important; font-weight: 700 !important; letter-spacing: -0.01em !important; }
+h3 { color: #cbd5e1 !important; font-weight: 600 !important; }
+h4 { color: #94a3b8 !important; font-weight: 600 !important; }
+p, li, span { color: #94a3b8; }
+
+/* ── Tabs ── */
+[data-testid="stTabs"] [role="tablist"] {
+    background: #111827 !important;
+    border-radius: 10px !important;
+    padding: 4px !important;
+    gap: 3px !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    margin-bottom: 20px !important;
+}
+[data-testid="stTabs"] [role="tab"] {
+    border-radius: 7px !important;
+    color: #6b7280 !important;
+    font-weight: 500 !important;
+    font-size: 0.82rem !important;
+    padding: 6px 16px !important;
+    border: none !important;
+    background: transparent !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    background: linear-gradient(135deg,#1d4ed8,#2563eb) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    box-shadow: 0 2px 8px rgba(29,78,216,0.35) !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab-highlight"] { display:none !important; }
+[data-testid="stTabs"] [data-baseweb="tab-border"]    { display:none !important; }
+
+/* ── Metrics ── */
+[data-testid="stMetric"] {
+    background: #111827 !important;
+    border-radius: 10px !important;
+    padding: 18px 20px !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.4) !important;
+}
+[data-testid="stMetricLabel"] p {
+    color: #6b7280 !important;
+    font-size: 0.70rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.09em !important;
+    font-weight: 600 !important;
+}
+[data-testid="stMetricValue"] {
+    color: #f1f5f9 !important;
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+}
+[data-testid="stMetricDelta"] { font-size: 0.80rem !important; font-weight: 600 !important; }
+
+/* ── Buttons ── */
+[data-testid="baseButton-primary"] {
+    background: linear-gradient(135deg,#1e40af,#2563eb) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    font-size: 0.83rem !important;
+    letter-spacing: 0.02em !important;
+    box-shadow: 0 2px 10px rgba(37,99,235,0.35) !important;
+    transition: all 0.2s !important;
+    color: #fff !important;
+}
+[data-testid="baseButton-primary"]:hover {
+    box-shadow: 0 4px 16px rgba(37,99,235,0.5) !important;
+    transform: translateY(-1px) !important;
+}
+[data-testid="baseButton-secondary"] {
+    background: rgba(255,255,255,0.04) !important;
+    border: 1px solid rgba(255,255,255,0.10) !important;
+    border-radius: 8px !important;
+    color: #94a3b8 !important;
+    font-weight: 500 !important;
+    font-size: 0.83rem !important;
+}
+[data-testid="baseButton-secondary"]:hover {
+    background: rgba(255,255,255,0.08) !important;
+    color: #e2e8f0 !important;
+}
+
+/* ── Inputs ── */
+[data-testid="stTextInput"] input,
+[data-baseweb="select"] > div {
+    background: #111827 !important;
+    border: 1px solid rgba(255,255,255,0.10) !important;
+    border-radius: 8px !important;
+    color: #e2e8f0 !important;
+    font-size: 0.84rem !important;
+}
+[data-testid="stTextInput"] input:focus,
+[data-baseweb="select"] > div:focus-within {
+    border-color: #2563eb !important;
+    box-shadow: 0 0 0 2px rgba(37,99,235,0.2) !important;
+}
+
+/* ── Dataframes ── */
+[data-testid="stDataFrame"] {
+    border-radius: 10px !important;
+    overflow: hidden !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+}
+[data-testid="stDataFrame"] th {
+    background: #111827 !important;
+    color: #6b7280 !important;
+    font-size: 0.70rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+    font-weight: 600 !important;
+}
+
+/* ── Expander ── */
+[data-testid="stExpander"] {
+    background: #111827 !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    border-radius: 10px !important;
+    overflow: hidden !important;
+}
+[data-testid="stExpander"] summary {
+    color: #94a3b8 !important;
+    font-weight: 500 !important;
+    font-size: 0.84rem !important;
+}
+
+/* ── Alerts ── */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+    border-width: 1px !important;
+    font-size: 0.84rem !important;
+}
+
+/* ── Sidebar labels ── */
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] .stRadio span,
+[data-testid="stSidebar"] p {
+    color: #6b7280 !important;
+    font-size: 0.78rem !important;
+}
+[data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+    color: #94a3b8 !important;
+    font-size: 0.72rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.12em !important;
+    font-weight: 700 !important;
+    margin: 16px 0 6px !important;
+}
+
+/* ── Divider ── */
+hr { border: none !important; border-top: 1px solid rgba(255,255,255,0.06) !important; margin: 1rem 0 !important; }
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: #080d18; }
+::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #334155; }
+
+/* ── Caption ── */
+[data-testid="stCaptionContainer"] p { color: #475569 !important; font-size: 0.74rem !important; }
+
+/* ── Plotly chart wrapper ── */
+.stPlotlyChart { border-radius: 12px !important; overflow: hidden !important; }
+.js-plotly-plot .plotly .main-svg { border-radius: 12px !important; }
 </style>""", unsafe_allow_html=True)
 
 
 # ── Header ─────────────────────────────────────────────────────────────────
 def _header() -> None:
     st.markdown(
-        f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1>'
-        f'<p>Professional Revenue Management Analytics · v{APP_VERSION}</p></div>',
+        f"""<div style='display:flex;align-items:center;justify-content:space-between;
+                        padding:18px 4px 16px;border-bottom:1px solid rgba(255,255,255,0.06);
+                        margin-bottom:20px;'>
+          <div style='display:flex;align-items:center;gap:14px;'>
+            <div style='font-size:2rem;line-height:1'>{APP_ICON}</div>
+            <div>
+              <h1 style='margin:0;font-size:1.45rem;font-weight:800;color:#f1f5f9;
+                         letter-spacing:-0.03em;line-height:1.1'>{APP_TITLE}</h1>
+              <p style='margin:2px 0 0;font-size:0.73rem;color:#475569;letter-spacing:0.04em;
+                        text-transform:uppercase;font-weight:500'>
+                Revenue Management Analytics &nbsp;·&nbsp; v{APP_VERSION}</p>
+            </div>
+          </div>
+          <div style='display:flex;gap:8px;align-items:center;'>
+            <span style='background:#0d2145;border:1px solid #1d4ed8;border-radius:20px;
+                         padding:4px 12px;font-size:0.70rem;color:#60a5fa;font-weight:600;
+                         letter-spacing:0.04em;text-transform:uppercase'>LIVE</span>
+          </div>
+        </div>""",
         unsafe_allow_html=True,
     )
 
@@ -107,92 +295,114 @@ def _ingest(folder: str, force: bool = False) -> tuple[pd.DataFrame, dict, str]:
 # ── Sidebar ─────────────────────────────────────────────────────────────────
 def _sidebar(df: pd.DataFrame) -> dict:
     with st.sidebar:
-        st.markdown("## ⚙️ Controls")
+        # Logo / brand
+        st.markdown(
+            f"<div style='text-align:center;padding:8px 0 16px;border-bottom:1px solid "
+            f"rgba(255,255,255,0.05);margin-bottom:16px;'>"
+            f"<span style='font-size:1.6rem'>{APP_ICON}</span>"
+            f"<p style='margin:4px 0 0;font-size:0.65rem;letter-spacing:0.14em;text-transform:uppercase;"
+            f"color:#334155;font-weight:700'>Revenue Intelligence</p>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
         # ── Data source ────────────────────────────────────────────────────
-        st.markdown("### 📁 Data Source")
+        st.markdown("<p style='font-size:0.65rem;letter-spacing:0.12em;text-transform:uppercase;"
+                    "color:#334155;font-weight:700;margin:0 0 8px'>📁 Data Source</p>",
+                    unsafe_allow_html=True)
         default_folder = st.session_state.get("last_folder", DEFAULT_DATA_FOLDER or "")
         folder = st.text_input(
-            "Root Data Folder",
+            "folder",
             value=default_folder,
-            placeholder=r"U:\Your\Data\Folder",
-            help=(
-                "Full path to your root data folder.\n"
-                "Subfolders: Year / Month / Day / HotelName.xlsx\n\n"
-                r"Example: U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
-            ),
+            placeholder=r"U:\Revenue\Data",
+            label_visibility="collapsed",
+            help="Full path: Year / Month / Day / HotelName.xlsx",
         )
-        load_btn = st.button("🔄 Check for New Files", use_container_width=True, type="primary")
-        force_btn = st.button("⚡ Force Full Rebuild", use_container_width=True,
-                              help="Re-parse ALL files from scratch. Only needed if data was corrected.")
+        load_btn  = st.button("🔄 Check for New Files",  use_container_width=True, type="primary")
+        force_btn = st.button("⚡ Force Full Rebuild",    use_container_width=True,
+                              help="Re-parse ALL files from scratch.")
 
         # ── Cache info ─────────────────────────────────────────────────────
         info = cache_manager.get_cache_info()
         if info:
             st.markdown(
-                f"<div style='background:#1e2a3a;border-radius:6px;padding:8px 12px;"
-                f"font-size:0.78rem;color:#94A3B8;margin-bottom:4px;'>"
-                f"💾 Cache: {info.get('saved_at_display','?')} · "
-                f"{info.get('rows',0):,} rows · {info.get('hotels',0)} hotels · "
-                f"{info.get('cache_size_mb',0)} MB</div>",
+                f"<div style='background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);"
+                f"border-radius:8px;padding:10px 12px;margin:10px 0 4px;'>"
+                f"<p style='margin:0;font-size:0.68rem;color:#334155;text-transform:uppercase;"
+                f"letter-spacing:0.08em;font-weight:700;margin-bottom:6px'>Cache</p>"
+                f"<p style='margin:0;font-size:0.75rem;color:#4b5563;line-height:1.6'>"
+                f"⏱ {info.get('saved_at_display','?')}<br>"
+                f"📦 {info.get('rows',0):,} rows &nbsp;·&nbsp; {info.get('cache_size_mb',0)} MB<br>"
+                f"🏨 {info.get('hotels',0)} hotels &nbsp;·&nbsp; {info.get('snapshots',0)} snapshots"
+                f"</p></div>",
                 unsafe_allow_html=True,
             )
             if st.button("🗑️ Clear Cache", use_container_width=True):
                 cache_manager.clear_cache()
-                st.sidebar.success("Cache cleared.")
                 st.rerun()
 
-        # ── Snapshot summary ───────────────────────────────────────────────
+        # ── Snapshot range ─────────────────────────────────────────────────
         if not df.empty:
             snaps = kpi_engine.get_snapshots(df)
             if snaps:
                 st.markdown(
-                    f"<div style='background:#162032;border-radius:6px;padding:6px 12px;"
-                    f"font-size:0.78rem;color:#60a5fa;'>"
-                    f"📅 {len(snaps)} snapshots · "
-                    f"{snaps[0].strftime('%d %b')} → {snaps[-1].strftime('%d %b %Y')}"
-                    f"</div>",
+                    f"<div style='background:rgba(29,78,216,0.08);border:1px solid rgba(29,78,216,0.2);"
+                    f"border-radius:8px;padding:8px 12px;margin:6px 0;'>"
+                    f"<p style='margin:0;font-size:0.73rem;color:#3b82f6;font-weight:500'>"
+                    f"📅 {len(snaps)} snapshots &nbsp;·&nbsp; "
+                    f"{snaps[0].strftime('%d %b %Y')} → {snaps[-1].strftime('%d %b %Y')}"
+                    f"</p></div>",
                     unsafe_allow_html=True,
                 )
 
-        st.markdown("---")
+        st.markdown("<hr style='margin:16px 0'>", unsafe_allow_html=True)
 
         # ── Mode & hotel ───────────────────────────────────────────────────
-        st.markdown("### 🎯 Analysis Mode")
-        mode = st.radio("Mode", ["Hotel Level", "Portfolio Level"], label_visibility="collapsed")
+        st.markdown("<p style='font-size:0.65rem;letter-spacing:0.12em;text-transform:uppercase;"
+                    "color:#334155;font-weight:700;margin:0 0 8px'>🎯 Analysis Mode</p>",
+                    unsafe_allow_html=True)
+        mode = st.radio("mode", ["Hotel Level", "Portfolio Level"], label_visibility="collapsed")
 
         selected_hotel = None
         if mode == "Hotel Level" and not df.empty and "hotel_name" in df.columns:
             hotels = sorted(df["hotel_name"].dropna().unique())
-            selected_hotel = st.selectbox("🏨 Select Hotel", hotels)
+            st.markdown("<p style='font-size:0.65rem;letter-spacing:0.12em;text-transform:uppercase;"
+                        "color:#334155;font-weight:700;margin:8px 0 4px'>🏨 Hotel</p>",
+                        unsafe_allow_html=True)
+            selected_hotel = st.selectbox("hotel", hotels, label_visibility="collapsed")
 
-        st.markdown("---")
+        st.markdown("<hr style='margin:16px 0'>", unsafe_allow_html=True)
 
         # ── Date range ─────────────────────────────────────────────────────
-        st.markdown("### 📅 Date Range (Arrival)")
+        st.markdown("<p style='font-size:0.65rem;letter-spacing:0.12em;text-transform:uppercase;"
+                    "color:#334155;font-weight:700;margin:0 0 8px'>📅 Arrival Date Range</p>",
+                    unsafe_allow_html=True)
         date_min = date_max = None
         if not df.empty and "date" in df.columns:
             d_min = df["date"].min().date()
             d_max = df["date"].max().date()
             date_range = st.date_input(
-                "Date Range",
-                value=(d_min, d_max),
-                min_value=d_min,
-                max_value=d_max,
+                "date_range", value=(d_min, d_max),
+                min_value=d_min, max_value=d_max,
                 label_visibility="collapsed",
             )
             if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
                 date_min, date_max = date_range
 
-        st.markdown("---")
+        st.markdown("<hr style='margin:16px 0'>", unsafe_allow_html=True)
 
         # ── Forecast ───────────────────────────────────────────────────────
-        st.markdown("### 🔮 Forecasting")
-        fc_method = st.selectbox("Method", FORECAST_METHODS)
-        fc_horizon = st.selectbox("Horizon (days)", FORECAST_HORIZONS, index=1)
+        st.markdown("<p style='font-size:0.65rem;letter-spacing:0.12em;text-transform:uppercase;"
+                    "color:#334155;font-weight:700;margin:0 0 8px'>🔮 Forecasting</p>",
+                    unsafe_allow_html=True)
+        fc_method  = st.selectbox("method",  FORECAST_METHODS,    label_visibility="collapsed")
+        fc_horizon = st.selectbox("horizon", FORECAST_HORIZONS,   label_visibility="collapsed", index=1)
 
-        st.markdown("---")
-        st.caption(f"v{APP_VERSION} · Hotel Revenue Analytics")
+        st.markdown(
+            f"<p style='text-align:center;margin-top:24px;font-size:0.64rem;color:#1e293b;"
+            f"letter-spacing:0.06em'>v{APP_VERSION} · Revenue Analytics</p>",
+            unsafe_allow_html=True,
+        )
 
     return {
         "folder": folder,
@@ -394,14 +604,33 @@ def main() -> None:
     # ── Empty state ────────────────────────────────────────────────────────
     if df.empty:
         st.markdown(
-            "<div style='text-align:center;padding:80px;'>"
-            "<h2 style='color:#60a5fa;'>🏨 Welcome to the Revenue Management Platform</h2>"
-            "<p style='color:#94a3b8;font-size:1rem;'>Enter the path to your root data folder in the sidebar "
-            "and click <b>Load / Refresh Data</b>.</p>"
-            "<p style='color:#64748b;'>Supported formats: <b>.xlsx · .xls · .csv</b></p>"
-            "<p style='color:#64748b;font-size:0.85rem;'>Expected folder structure:<br>"
-            "<code>Root / 2026 / Januar / 15 / Aschaffenburg.xlsx</code></p>"
-            "</div>",
+            """<div style='display:flex;flex-direction:column;align-items:center;
+                           justify-content:center;padding:80px 40px;text-align:center;'>
+              <div style='font-size:4rem;margin-bottom:20px'>🏨</div>
+              <h2 style='color:#f1f5f9;font-size:1.8rem;font-weight:800;
+                         letter-spacing:-0.03em;margin:0 0 12px'>
+                Revenue Management Platform</h2>
+              <p style='color:#475569;font-size:0.95rem;max-width:480px;line-height:1.7;margin:0 0 32px'>
+                Enter the path to your data folder in the sidebar and click
+                <strong style='color:#60a5fa'>Check for New Files</strong> to load your hotel data.
+              </p>
+              <div style='display:flex;gap:16px;flex-wrap:wrap;justify-content:center;'>
+                <div style='background:#111827;border:1px solid rgba(255,255,255,0.06);
+                            border-radius:10px;padding:16px 24px;min-width:180px;'>
+                  <p style='margin:0;font-size:0.65rem;color:#334155;text-transform:uppercase;
+                             letter-spacing:0.1em;font-weight:700'>Formats</p>
+                  <p style='margin:6px 0 0;color:#60a5fa;font-weight:600;font-size:0.9rem'>
+                    .xlsx &nbsp;·&nbsp; .xls &nbsp;·&nbsp; .csv</p>
+                </div>
+                <div style='background:#111827;border:1px solid rgba(255,255,255,0.06);
+                            border-radius:10px;padding:16px 24px;min-width:180px;'>
+                  <p style='margin:0;font-size:0.65rem;color:#334155;text-transform:uppercase;
+                             letter-spacing:0.1em;font-weight:700'>Folder Structure</p>
+                  <p style='margin:6px 0 0;color:#94a3b8;font-size:0.80rem;font-family:monospace'>
+                    Year / Month / Day / Hotel.xlsx</p>
+                </div>
+              </div>
+            </div>""",
             unsafe_allow_html=True,
         )
         return

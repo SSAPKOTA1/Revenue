@@ -24,11 +24,13 @@ _DARK = dict(
 
 def _card(label: str, value: str, col) -> None:
     col.markdown(
-        f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
-            border-radius:10px;padding:18px 22px;text-align:center;
-            border:1px solid rgba(255,255,255,0.08);'>
-          <p style='margin:0;font-size:11px;color:#94a3b8;letter-spacing:1px;text-transform:uppercase'>{label}</p>
-          <p style='margin:6px 0 0;font-size:24px;font-weight:700;color:#f1f5f9'>{value}</p>
+        f"""<div style='background:#111827;border-radius:12px;padding:18px 22px;text-align:center;
+                        border:1px solid rgba(255,255,255,0.06);
+                        box-shadow:0 4px 16px rgba(0,0,0,0.35);'>
+          <p style='margin:0;font-size:10px;color:#374151;letter-spacing:0.12em;
+                    text-transform:uppercase;font-weight:700'>{label}</p>
+          <p style='margin:8px 0 0;font-size:24px;font-weight:800;color:#f1f5f9;
+                    letter-spacing:-0.02em'>{value}</p>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -43,26 +45,28 @@ def _safe(v, default=0.0):
 
 
 def _metric_block(label: str, closed_val, open_val, total_val, fmt: str, col) -> None:
-    """Render one KPI card with Closed / Open / Combined."""
+    """Render one KPI card: combined large at top, closed/open split below."""
     col.markdown(
-        f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
-            border-radius:10px;padding:14px 16px;text-align:center;
-            border:1px solid rgba(255,255,255,0.08);'>
-          <p style='margin:0 0 4px;font-size:11px;color:#94a3b8;letter-spacing:1px;
-                    text-transform:uppercase'>{label}</p>
-          <p style='margin:0 0 8px;font-size:21px;font-weight:800;color:#f1f5f9'>
-            {fmt.format(total_val)}</p>
+        f"""<div style='background:#111827;border-radius:12px;padding:16px 18px;
+                        border:1px solid rgba(255,255,255,0.06);
+                        box-shadow:0 4px 16px rgba(0,0,0,0.4);'>
+          <p style='margin:0 0 6px;font-size:10px;color:#374151;letter-spacing:0.12em;
+                    text-transform:uppercase;font-weight:700'>{label}</p>
+          <p style='margin:0 0 10px;font-size:22px;font-weight:800;color:#f1f5f9;
+                    letter-spacing:-0.02em;line-height:1'>{fmt.format(total_val)}</p>
           <div style='display:flex;justify-content:space-around;
-                      border-top:1px solid rgba(255,255,255,0.07);padding-top:8px;'>
-            <div>
-              <p style='margin:0;font-size:9px;color:#64748b'>✅ Closed</p>
-              <p style='margin:2px 0 0;font-size:14px;font-weight:700;color:#34d399'>
+                      border-top:1px solid rgba(255,255,255,0.05);padding-top:10px;gap:4px;'>
+            <div style='text-align:center;flex:1'>
+              <p style='margin:0;font-size:9px;color:#374151;letter-spacing:0.08em;
+                        text-transform:uppercase;font-weight:600'>Closed</p>
+              <p style='margin:3px 0 0;font-size:13px;font-weight:700;color:#10b981;line-height:1'>
                 {fmt.format(closed_val)}</p>
             </div>
-            <div style='border-left:1px solid rgba(255,255,255,0.08)'></div>
-            <div>
-              <p style='margin:0;font-size:9px;color:#64748b'>📋 Open</p>
-              <p style='margin:2px 0 0;font-size:14px;font-weight:700;color:#60a5fa'>
+            <div style='width:1px;background:rgba(255,255,255,0.05)'></div>
+            <div style='text-align:center;flex:1'>
+              <p style='margin:0;font-size:9px;color:#374151;letter-spacing:0.08em;
+                        text-transform:uppercase;font-weight:600'>Open</p>
+              <p style='margin:3px 0 0;font-size:13px;font-weight:700;color:#3b82f6;line-height:1'>
                 {fmt.format(open_val)}</p>
             </div>
           </div>
@@ -81,9 +85,14 @@ def _kpi_row(df: pd.DataFrame) -> None:
     today = pd.Timestamp.today()
 
     st.markdown(
-        f"<p style='font-size:0.78rem;color:#64748b;margin-bottom:6px;'>"
-        f"✅ <b>Closed</b> = arrival dates up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')} (actuals) &nbsp;·&nbsp; "
-        f"📋 <b>Open</b> = from {today.strftime('%d %b %Y')} onwards (on-books)</p>",
+        f"<div style='display:flex;gap:12px;margin-bottom:10px;flex-wrap:wrap;'>"
+        f"<span style='font-size:0.72rem;color:#374151;background:rgba(16,185,129,0.08);"
+        f"border:1px solid rgba(16,185,129,0.15);border-radius:20px;padding:3px 10px;font-weight:500'>"
+        f"✅ Closed — up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')}</span>"
+        f"<span style='font-size:0.72rem;color:#374151;background:rgba(59,130,246,0.08);"
+        f"border:1px solid rgba(59,130,246,0.15);border-radius:20px;padding:3px 10px;font-weight:500'>"
+        f"📋 Open — from {today.strftime('%d %b %Y')} onwards</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -97,9 +106,9 @@ def _kpi_row(df: pd.DataFrame) -> None:
     _metric_block("Revenue",     c["revenue"],       o["revenue"],       t["revenue"],       "€{:,.0f}", cols[3])
     _metric_block("Rooms Sold",  c["rooms_sold"],    o["rooms_sold"],    t["rooms_sold"],    "{:,.0f}",  cols[4])
 
-    # Hotels count — single value
     st.markdown(
-        f"<p style='font-size:0.8rem;color:#94a3b8;margin-top:4px;'>🏨 {n_hotels} hotels</p>",
+        f"<p style='font-size:0.70rem;color:#374151;margin-top:8px;font-weight:500'>"
+        f"🏨 {n_hotels} hotels in portfolio</p>",
         unsafe_allow_html=True,
     )
 

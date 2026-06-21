@@ -47,17 +47,19 @@ def _fmt(val: float, metric: str) -> str:
 def _kpi_card(label: str, value: str, delta: Optional[str] = None, delta_pos: bool = True) -> str:
     delta_html = ""
     if delta:
-        color = "#22c55e" if delta_pos else "#ef4444"
+        color = "#10b981" if delta_pos else "#ef4444"
         arrow = "▲" if delta_pos else "▼"
-        delta_html = f"<span style='color:{color};font-size:13px'>{arrow} {delta}</span>"
-    return f"""
-    <div style='background:linear-gradient(135deg,#1a2744,#1e3a5f);border-radius:10px;
-                padding:18px 22px;border:1px solid rgba(255,255,255,0.08);
-                box-shadow:0 4px 15px rgba(0,0,0,0.3);'>
-      <p style='margin:0;font-size:11px;color:#94a3b8;letter-spacing:1px;text-transform:uppercase'>{label}</p>
-      <p style='margin:6px 0 2px;font-size:26px;font-weight:700;color:#f1f5f9'>{value}</p>
-      {delta_html}
-    </div>"""
+        delta_html = (f"<span style='color:{color};font-size:12px;font-weight:600'>"
+                      f"{arrow} {delta}</span>")
+    return (
+        f"<div style='background:#111827;border-radius:12px;padding:18px 20px;"
+        f"border:1px solid rgba(255,255,255,0.06);box-shadow:0 4px 16px rgba(0,0,0,0.4);'>"
+        f"<p style='margin:0;font-size:10px;color:#374151;letter-spacing:0.12em;"
+        f"text-transform:uppercase;font-weight:700'>{label}</p>"
+        f"<p style='margin:8px 0 4px;font-size:26px;font-weight:800;color:#f1f5f9;"
+        f"letter-spacing:-0.02em;line-height:1'>{value}</p>"
+        f"{delta_html}</div>"
+    )
 
 
 def _kpi_row(df: pd.DataFrame) -> None:
@@ -65,14 +67,18 @@ def _kpi_row(df: pd.DataFrame) -> None:
     closed_df, open_df = kpi_engine.split_closed_open(df)
     c = kpi_engine._kpis_from_df(closed_df)
     o = kpi_engine._kpis_from_df(open_df)
-    t = kpi_engine._kpis_from_df(df)       # combined — re-derived from full sums
+    t = kpi_engine._kpis_from_df(df)
     today = pd.Timestamp.today()
 
     st.markdown(
-        f"<p style='font-size:0.78rem;color:#64748b;margin-bottom:6px;'>"
-        f"✅ <b>Closed</b> = up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')} &nbsp;·&nbsp; "
-        f"📋 <b>Open</b> = from {today.strftime('%d %b %Y')} on-books &nbsp;·&nbsp; "
-        f"⬜ <b>Combined</b> = full period</p>",
+        f"<div style='display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap;'>"
+        f"<span style='font-size:0.71rem;color:#374151;background:rgba(16,185,129,0.08);"
+        f"border:1px solid rgba(16,185,129,0.15);border-radius:20px;padding:3px 10px;font-weight:500'>"
+        f"✅ Closed — up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')}</span>"
+        f"<span style='font-size:0.71rem;color:#374151;background:rgba(59,130,246,0.08);"
+        f"border:1px solid rgba(59,130,246,0.15);border-radius:20px;padding:3px 10px;font-weight:500'>"
+        f"📋 Open — from {today.strftime('%d %b %Y')}</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
@@ -89,24 +95,26 @@ def _kpi_row(df: pd.DataFrame) -> None:
         ov = o.get(key, 0)
         tv = t.get(key, 0)
         col.markdown(
-            f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
-                border-radius:10px;padding:14px 16px;text-align:center;
-                border:1px solid rgba(255,255,255,0.08);'>
-              <p style='margin:0 0 4px;font-size:11px;color:#94a3b8;letter-spacing:1px;
-                        text-transform:uppercase'>{lbl}</p>
-              <p style='margin:0 0 8px;font-size:22px;font-weight:800;color:#f1f5f9'>
-                {fmt.format(tv)}</p>
+            f"""<div style='background:#111827;border-radius:12px;padding:16px 18px;
+                            border:1px solid rgba(255,255,255,0.06);
+                            box-shadow:0 4px 16px rgba(0,0,0,0.4);'>
+              <p style='margin:0 0 6px;font-size:10px;color:#374151;letter-spacing:0.12em;
+                        text-transform:uppercase;font-weight:700'>{lbl}</p>
+              <p style='margin:0 0 10px;font-size:22px;font-weight:800;color:#f1f5f9;
+                        letter-spacing:-0.02em;line-height:1'>{fmt.format(tv)}</p>
               <div style='display:flex;justify-content:space-around;
-                          border-top:1px solid rgba(255,255,255,0.07);padding-top:7px;'>
-                <div>
-                  <p style='margin:0;font-size:9px;color:#64748b'>✅ Closed</p>
-                  <p style='margin:2px 0 0;font-size:13px;font-weight:700;color:#34d399'>
+                          border-top:1px solid rgba(255,255,255,0.05);padding-top:9px;gap:4px;'>
+                <div style='text-align:center;flex:1'>
+                  <p style='margin:0;font-size:9px;color:#374151;letter-spacing:0.08em;
+                            text-transform:uppercase;font-weight:600'>Closed</p>
+                  <p style='margin:3px 0 0;font-size:12px;font-weight:700;color:#10b981;line-height:1'>
                     {fmt.format(cv)}</p>
                 </div>
-                <div style='border-left:1px solid rgba(255,255,255,0.08)'></div>
-                <div>
-                  <p style='margin:0;font-size:9px;color:#64748b'>📋 Open</p>
-                  <p style='margin:2px 0 0;font-size:13px;font-weight:700;color:#60a5fa'>
+                <div style='width:1px;background:rgba(255,255,255,0.05)'></div>
+                <div style='text-align:center;flex:1'>
+                  <p style='margin:0;font-size:9px;color:#374151;letter-spacing:0.08em;
+                            text-transform:uppercase;font-weight:600'>Open</p>
+                  <p style='margin:3px 0 0;font-size:12px;font-weight:700;color:#3b82f6;line-height:1'>
                     {fmt.format(ov)}</p>
                 </div>
               </div>
