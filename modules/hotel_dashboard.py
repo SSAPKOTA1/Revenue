@@ -190,151 +190,435 @@ def tab_performance(df: pd.DataFrame) -> None:
 # ── Tab: Pickup ──────────────────────────────────────────────────────────────
 
 def tab_pickup(df: pd.DataFrame) -> None:
-    st.subheader("Pickup Analysis")
+    """
+    Pickup = latest snapshot on-books  MINUS  a chosen past snapshot on-books,
+    for each arrival date. Grouped by Day / Week / Month / Year.
+    """
+    import plotly.graph_objects as go
 
-    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
-    available_metrics = [m for m in ["rooms_sold", "revenue", "adr"] if m in df.columns]
+    st.subheader("Pickup Analysis")
+    st.caption(
+        "Pickup measures how many rooms/revenue/ADR were added (or lost) "
+        "between the current booking position and a past snapshot."
+    )
+
+    available_metrics = [m for m in ["rooms_sold", "revenue", "adr", "occupancy_pct"] if m in df.columns]
     if not available_metrics:
         st.info("No pickup metrics found in data.")
         return
 
-    metric = st.selectbox("Pickup Metric", available_metrics, key="hotel_pickup_metric")
+    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
 
-    if has_snapshots:
-        n_snaps = df["snapshot_date"].nunique()
-        st.caption(
-            f"📅 {n_snaps} daily snapshots detected — showing true pickup "
-            f"(on-books change between snapshot dates)."
+    # ── Controls row ────────────────────────────────────────────────────────
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        metric = st.selectbox("Metric", available_metrics, key="pu_metric")
+    with c2:
+        group_by = st.selectbox(
+            "Group Arrival Dates By",
+            ["Daily", "Weekly", "Monthly", "Yearly"],
+            key="pu_groupby",
         )
+    with c3:
+        pass  # comparison selector placed below
 
-        pickup_df = pickup_pace.compute_pickup(df, metrics=available_metrics)
-        if pickup_df.empty:
-            st.info("Not enough snapshots to compute pickup.")
-            return
-
-        # Aggregate pickup across all arrival dates per snapshot date
-        snap_col = "snapshot_date"
-        for w in [1, 7, 14, 30]:
-            col = f"{metric}_pickup_{w}d"
-            if col not in pickup_df.columns:
-                continue
-            agg = pickup_df.groupby(snap_col)[col].sum().reset_index()
-            agg.columns = [snap_col, col]
-            fig = visualizations.area_chart(
-                agg, snap_col, col,
-                title=f"{w}-Day Pickup: {metric.replace('_',' ').title()} (by Snapshot Date)",
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Pickup curve for a selected arrival date
-        st.subheader("Booking Build-Up Curve")
-        future_dates = sorted(df["date"].dropna().unique())
-        if future_dates:
-            sel_date = st.selectbox(
-                "Select Arrival Date",
-                future_dates,
-                format_func=lambda d: pd.Timestamp(d).strftime("%Y-%m-%d"),
-                key="hotel_pickup_arrival",
-            )
-            hotel = df["hotel_name"].iloc[0] if "hotel_name" in df.columns else None
-            if hotel:
-                curve = pickup_pace.pickup_curve(df, hotel, pd.Timestamp(sel_date), metric)
-                if not curve.empty:
-                    import plotly.graph_objects as go
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(
-                        x=curve["days_to_arrival"][::-1],
-                        y=curve[metric],
-                        mode="lines+markers",
-                        line=dict(color="#2E86C1", width=2),
-                        name=metric,
-                    ))
-                    fig.update_layout(
-                        title=f"Booking Build-Up: {metric} for {pd.Timestamp(sel_date).strftime('%d %b %Y')}",
-                        xaxis_title="Days Before Arrival",
-                        xaxis_autorange="reversed",
-                        template="plotly_dark",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        plot_bgcolor="rgba(0,0,0,0)",
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-    else:
-        # Single snapshot fallback
-        st.caption("Single snapshot detected — showing day-over-day differences.")
-        pickup_df = pickup_pace.compute_pickup(df, metrics=available_metrics)
-        if pickup_df.empty:
-            st.info("Pickup analysis requires at least 2 data points.")
-            return
-        for w in [1, 7, 14, 30]:
-            col = f"{metric}_pickup_{w}d"
-            if col in pickup_df.columns:
-                fig = visualizations.area_chart(
-                    pickup_df, "date", col,
-                    title=f"{w}-Day Pickup: {metric.replace('_', ' ').title()}",
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-    # Waterfall summary
-    pickup_df2 = pickup_pace.compute_pickup(df, metrics=available_metrics)
-    cols = [f"{metric}_pickup_{w}d" for w in [1, 7, 14, 30] if f"{metric}_pickup_{w}d" in pickup_df2.columns]
-    if cols:
-        vals = [float(pickup_df2[c].sum()) for c in cols]
-        labels = ["1-Day", "7-Day", "14-Day", "30-Day"][:len(vals)]
-        fig = visualizations.waterfall_chart(labels, vals, title=f"Pickup Waterfall: {metric}")
+    if not has_snapshots:
+        st.info(
+            "No snapshot dates found in this data. "
+            "Pickup requires files organised in day-folders so each folder date "
+            "becomes a booking snapshot. Showing day-over-day totals instead."
+        )
+        daily = df.groupby("date")[metric].sum(min_count=1).reset_index().sort_values("date")
+        daily["pickup"] = daily[metric].diff()
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=daily["date"], y=daily["pickup"],
+                             marker_color=BRAND_COLORS["secondary"], name="Day-over-Day"))
+        fig.update_layout(title=f"Day-over-Day {metric}", template="plotly_dark",
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
         st.plotly_chart(fig, use_container_width=True)
+        return
+
+    # ── Snapshot selector ───────────────────────────────────────────────────
+    df2 = df.copy()
+    df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
+    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+    df2 = df2.dropna(subset=["snapshot_date", "date"])
+
+    all_snaps = sorted(df2["snapshot_date"].dropna().unique())
+    if len(all_snaps) < 2:
+        st.info("Need at least 2 snapshot dates to compute pickup.")
+        return
+
+    latest_snap = pd.Timestamp(all_snaps[-1])
+
+    # Preset options mapped to number of days back
+    preset_options = {
+        "1 day ago": 1,
+        "3 days ago": 3,
+        "7 days ago (1 week)": 7,
+        "14 days ago (2 weeks)": 14,
+        "30 days ago (1 month)": 30,
+        "60 days ago": 60,
+        "Custom date": -1,
+    }
+    with c3:
+        preset = st.selectbox("Compare latest vs.", list(preset_options.keys()), key="pu_preset")
+
+    if preset_options[preset] == -1:
+        compare_date = st.date_input(
+            "Pick comparison snapshot date",
+            value=pd.Timestamp(all_snaps[0]).date(),
+            min_value=pd.Timestamp(all_snaps[0]).date(),
+            max_value=pd.Timestamp(all_snaps[-2]).date(),
+            key="pu_custom_date",
+        )
+        target_snap_ts = pd.Timestamp(compare_date)
+    else:
+        target_snap_ts = latest_snap - pd.Timedelta(days=preset_options[preset])
+
+    # Find closest available snapshot to the target
+    snap_index = pd.DatetimeIndex(all_snaps)
+    diffs = abs(snap_index - target_snap_ts)
+    comparison_snap = pd.Timestamp(all_snaps[diffs.argmin()])
+
+    st.markdown(
+        f"**Latest snapshot:** `{latest_snap.strftime('%d %b %Y')}`   →   "
+        f"**Comparison snapshot:** `{comparison_snap.strftime('%d %b %Y')}`   "
+        f"*(Δ {(latest_snap - comparison_snap).days} days)*"
+    )
+
+    # ── Extract the two views ───────────────────────────────────────────────
+    latest_view = df2[df2["snapshot_date"] == latest_snap].copy()
+    compare_view = df2[df2["snapshot_date"] == comparison_snap].copy()
+
+    if latest_view.empty or compare_view.empty:
+        st.warning("One of the snapshots has no data for this hotel.")
+        return
+
+    # ── Grouping period column ──────────────────────────────────────────────
+    freq_map = {"Daily": "D", "Weekly": "W-MON", "Monthly": "ME", "Yearly": "YE"}
+    freq = freq_map[group_by]
+
+    def _add_period(frame: pd.DataFrame) -> pd.DataFrame:
+        f = frame.copy()
+        if group_by == "Daily":
+            f["period"] = f["date"].dt.normalize()
+        elif group_by == "Weekly":
+            f["period"] = f["date"].dt.to_period("W").apply(lambda p: p.start_time)
+        elif group_by == "Monthly":
+            f["period"] = f["date"].dt.to_period("M").apply(lambda p: p.start_time)
+        else:
+            f["period"] = f["date"].dt.to_period("Y").apply(lambda p: p.start_time)
+        return f
+
+    latest_agg = _add_period(latest_view).groupby("period")[metric].sum(min_count=1).rename("latest")
+    compare_agg = _add_period(compare_view).groupby("period")[metric].sum(min_count=1).rename("compare")
+
+    combined = pd.concat([latest_agg, compare_agg], axis=1).dropna(how="all").reset_index()
+    combined["pickup"] = combined["latest"].fillna(0) - combined["compare"].fillna(0)
+
+    if combined.empty:
+        st.info("No overlapping arrival dates between the two snapshots.")
+        return
+
+    # ── Main pickup bar chart ───────────────────────────────────────────────
+    metric_label = metric.replace("_", " ").title()
+    period_labels = combined["period"].dt.strftime(
+        "%d %b %Y" if group_by == "Daily" else
+        "W %W %Y" if group_by == "Weekly" else
+        "%b %Y" if group_by == "Monthly" else "%Y"
+    )
+
+    colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"] for v in combined["pickup"]]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=period_labels,
+        y=combined["pickup"],
+        marker_color=colors,
+        name=f"Pickup ({metric_label})",
+        text=[f"{v:+,.1f}" for v in combined["pickup"]],
+        textposition="outside",
+    ))
+    fig.update_layout(
+        title=f"{group_by} Pickup — {metric_label}  |  "
+              f"{comparison_snap.strftime('%d %b %Y')} → {latest_snap.strftime('%d %b %Y')}",
+        xaxis_title=f"Arrival Date ({group_by})",
+        yaxis_title=f"Change in {metric_label}",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Side-by-side comparison ─────────────────────────────────────────────
+    st.subheader("Side-by-Side: Latest vs Comparison Snapshot")
+    fig2 = go.Figure()
+    fig2.add_trace(go.Bar(
+        x=period_labels, y=combined["compare"],
+        name=f"As of {comparison_snap.strftime('%d %b %Y')}",
+        marker_color=BRAND_COLORS["neutral"],
+        opacity=0.8,
+    ))
+    fig2.add_trace(go.Bar(
+        x=period_labels, y=combined["latest"],
+        name=f"As of {latest_snap.strftime('%d %b %Y')}",
+        marker_color=BRAND_COLORS["secondary"],
+        opacity=0.9,
+    ))
+    fig2.update_layout(
+        barmode="group",
+        title=f"{metric_label} On-Books: {group_by} View",
+        xaxis_title=f"Arrival Date ({group_by})",
+        yaxis_title=metric_label,
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Summary KPIs ────────────────────────────────────────────────────────
+    total_latest = combined["latest"].sum()
+    total_compare = combined["compare"].sum()
+    total_pickup = combined["pickup"].sum()
+    pct_change = (total_pickup / abs(total_compare) * 100) if total_compare else 0
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"Total {metric_label} (Latest)", f"{total_latest:,.1f}")
+    k2.metric(f"Total {metric_label} (Comparison)", f"{total_compare:,.1f}")
+    k3.metric("Net Pickup", f"{total_pickup:+,.1f}")
+    k4.metric("% Change", f"{pct_change:+.1f}%")
 
 
 # ── Tab: Pace ─────────────────────────────────────────────────────────────────
 
 def tab_pace(df: pd.DataFrame) -> None:
+    """
+    Pace = for a selected arrival date (or range), how did the on-books
+    occupancy / rooms_sold / revenue change over time across snapshot dates?
+
+    X-axis = snapshot date (time the report was exported)
+    Y-axis = on-books value for the selected arrival dates at that snapshot
+    """
+    import plotly.graph_objects as go
+
     st.subheader("Pace Analysis")
+    st.caption(
+        "Select an arrival date or date range below. "
+        "The chart shows how the on-books position for those dates "
+        "evolved over time as bookings accumulated."
+    )
 
     has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
-    if has_snapshots:
-        snaps = sorted(df["snapshot_date"].dropna().unique())
-        latest = pd.Timestamp(snaps[-1])
-        st.caption(
-            f"📅 {len(snaps)} snapshots available. "
-            f"Current position: **{latest.strftime('%d %b %Y')}**"
-        )
+    metrics = [m for m in ["rooms_sold", "occupancy_pct", "revenue", "adr"] if m in df.columns]
 
-    benchmark = st.selectbox(
-        "Benchmark",
-        ["last_year", "budget", "forecast", "portfolio_avg"],
-        key="hotel_pace_benchmark",
-    )
-    metrics = [m for m in ["rooms_sold", "revenue", "adr", "occupancy_pct"] if m in df.columns]
-    selected_metric = st.selectbox("Pace Metric", metrics, key="hotel_pace_metric")
-
-    pace_df = pickup_pace.compute_pace(df, benchmark=benchmark, metrics=metrics)
-    if pace_df.empty:
-        st.info(f"Pace vs '{benchmark}' not available — missing required reference columns.")
+    if not metrics:
+        st.info("No metrics available for pace analysis.")
         return
 
-    pace_for_metric = pace_df[pace_df["metric"] == selected_metric] if "metric" in pace_df.columns else pace_df
+    if not has_snapshots:
+        st.info(
+            "Pace analysis requires multiple snapshot dates. "
+            "Organise your data files in day-folders so each folder date "
+            "becomes a booking snapshot."
+        )
+        return
 
-    if not pace_for_metric.empty:
-        fig = visualizations.pace_curve(pace_for_metric, title=f"Pace: {selected_metric} vs {benchmark}")
-        st.plotly_chart(fig, use_container_width=True)
+    df2 = df.copy()
+    df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
+    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+    df2 = df2.dropna(subset=["snapshot_date", "date"])
 
-        if "pace_var" in pace_for_metric.columns:
-            fig2 = visualizations.bar_chart(
-                pace_for_metric,
-                x="date" if "date" in pace_for_metric.columns else "month_day",
-                y="pace_var",
-                title="Pace Variance",
-                color=BRAND_COLORS["warning"],
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+    all_snaps = sorted(df2["snapshot_date"].dropna().unique())
+    all_arrival_dates = sorted(df2["date"].dropna().unique())
 
-    # Booking window
-    bw = pickup_pace.booking_window_distribution(df)
-    if bw is not None and not bw.empty:
-        st.subheader("Booking Window Distribution")
-        fig = visualizations.booking_window_hist(bw)
-        st.plotly_chart(fig, use_container_width=True)
+    if not all_arrival_dates:
+        st.info("No arrival dates found.")
+        return
+
+    # ── Controls ────────────────────────────────────────────────────────────
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        metric = st.selectbox("Metric to track", metrics, key="pace_metric")
+    with c2:
+        selection_mode = st.radio(
+            "Date selection",
+            ["Single date", "Date range"],
+            horizontal=True,
+            key="pace_sel_mode",
+        )
+
+    min_arrival = pd.Timestamp(all_arrival_dates[0]).date()
+    max_arrival = pd.Timestamp(all_arrival_dates[-1]).date()
+
+    if selection_mode == "Single date":
+        # Default to a date roughly 30 days out from last snapshot
+        default_date = min(
+            pd.Timestamp(all_snaps[-1]) + pd.Timedelta(days=30),
+            pd.Timestamp(all_arrival_dates[-1]),
+        ).date()
+        default_date = max(default_date, min_arrival)
+
+        sel_date = st.date_input(
+            "Arrival date",
+            value=default_date,
+            min_value=min_arrival,
+            max_value=max_arrival,
+            key="pace_single_date",
+        )
+        mask = df2["date"] == pd.Timestamp(sel_date)
+        date_label = pd.Timestamp(sel_date).strftime("%d %b %Y")
     else:
-        st.info("Booking window analysis requires 'booking_date' column.")
+        default_start = min_arrival
+        default_end = max_arrival
+        date_range = st.date_input(
+            "Arrival date range",
+            value=(default_start, default_end),
+            min_value=min_arrival,
+            max_value=max_arrival,
+            key="pace_date_range",
+        )
+        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+            start_dt, end_dt = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+        else:
+            start_dt = end_dt = pd.Timestamp(date_range[0])
+        mask = (df2["date"] >= start_dt) & (df2["date"] <= end_dt)
+        date_label = f"{start_dt.strftime('%d %b %Y')} – {end_dt.strftime('%d %b %Y')}"
+
+    selected = df2[mask].copy()
+
+    if selected.empty:
+        st.warning("No data for the selected arrival date(s). Try a different date.")
+        return
+
+    # ── Aggregate by snapshot date ──────────────────────────────────────────
+    agg_func = "mean" if metric in ("adr", "occupancy_pct") else "sum"
+    pace_series = (
+        selected.groupby("snapshot_date")[metric]
+        .agg(agg_func)
+        .reset_index()
+        .sort_values("snapshot_date")
+    )
+
+    if pace_series.empty or len(pace_series) < 2:
+        st.info("Not enough snapshots to draw a pace curve for this date. "
+                "Try a broader date range.")
+        return
+
+    # ── Pace curve ──────────────────────────────────────────────────────────
+    metric_label = metric.replace("_", " ").title()
+    latest_val = float(pace_series[metric].iloc[-1])
+    first_val = float(pace_series[metric].iloc[0])
+    total_change = latest_val - first_val
+    pct_change = (total_change / abs(first_val) * 100) if first_val else 0
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=pace_series["snapshot_date"],
+        y=pace_series[metric],
+        mode="lines+markers",
+        line=dict(color=BRAND_COLORS["secondary"], width=2.5),
+        marker=dict(size=7, color=BRAND_COLORS["accent"]),
+        name=metric_label,
+        hovertemplate="%{x|%d %b %Y}<br>" + metric_label + ": %{y:,.1f}<extra></extra>",
+    ))
+    # Shade the area under the curve
+    fig.add_trace(go.Scatter(
+        x=pace_series["snapshot_date"],
+        y=pace_series[metric],
+        fill="tozeroy",
+        fillcolor="rgba(46,134,193,0.12)",
+        line=dict(width=0),
+        showlegend=False,
+        hoverinfo="skip",
+    ))
+    fig.update_layout(
+        title=f"Pace of {metric_label} for Arrival Date(s): {date_label}",
+        xaxis_title="Snapshot Date (as-of date of the report)",
+        yaxis_title=metric_label,
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── KPI row ─────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"Earliest on-books ({pd.Timestamp(pace_series['snapshot_date'].iloc[0]).strftime('%d %b')})",
+              f"{first_val:,.1f}")
+    k2.metric(f"Latest on-books ({pd.Timestamp(pace_series['snapshot_date'].iloc[-1]).strftime('%d %b')})",
+              f"{latest_val:,.1f}")
+    k3.metric("Total Change", f"{total_change:+,.1f}")
+    k4.metric("% Change", f"{pct_change:+.1f}%")
+
+    # ── Period-over-period pace comparison ──────────────────────────────────
+    st.subheader("Weekly Pace Change")
+    st.caption("Change in on-books from week to week (7-day intervals in snapshot dates).")
+    pace_series["weekly_change"] = pace_series[metric].diff(7).fillna(pace_series[metric].diff())
+    fig2 = go.Figure()
+    colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"]
+              for v in pace_series["weekly_change"]]
+    fig2.add_trace(go.Bar(
+        x=pace_series["snapshot_date"],
+        y=pace_series["weekly_change"],
+        marker_color=colors,
+        name="7-Day Change",
+        hovertemplate="%{x|%d %b %Y}<br>Change: %{y:+,.1f}<extra></extra>",
+    ))
+    fig2.update_layout(
+        title=f"Week-over-Week Change in {metric_label} (for {date_label})",
+        xaxis_title="Snapshot Date",
+        yaxis_title=f"Change in {metric_label}",
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Multi-metric comparison (if date range selected) ────────────────────
+    if selection_mode == "Date range" and len(metrics) > 1:
+        st.subheader("Multi-Metric Pace Overview")
+        available = [m for m in ["rooms_sold", "occupancy_pct", "revenue"] if m in df2.columns]
+        if len(available) >= 2:
+            fig3 = go.Figure()
+            color_cycle = [BRAND_COLORS["secondary"], BRAND_COLORS["accent"],
+                           BRAND_COLORS["success"], BRAND_COLORS["warning"]]
+            for i, m in enumerate(available):
+                agg_fn = "mean" if m in ("adr", "occupancy_pct") else "sum"
+                s = selected.groupby("snapshot_date")[m].agg(agg_fn).reset_index().sort_values("snapshot_date")
+                if s.empty:
+                    continue
+                # Normalise to index (100 = first snapshot) for comparison
+                base = s[m].iloc[0]
+                if base and base != 0:
+                    s["indexed"] = s[m] / base * 100
+                    fig3.add_trace(go.Scatter(
+                        x=s["snapshot_date"], y=s["indexed"],
+                        mode="lines+markers",
+                        name=m.replace("_", " ").title(),
+                        line=dict(color=color_cycle[i % len(color_cycle)], width=2),
+                    ))
+            fig3.add_hline(y=100, line_dash="dash", line_color="white", opacity=0.3,
+                           annotation_text="Baseline (first snapshot)")
+            fig3.update_layout(
+                title="Pace Index (100 = first snapshot) — All Metrics",
+                xaxis_title="Snapshot Date",
+                yaxis_title="Index (100 = first snapshot)",
+                template="plotly_dark",
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+
+    # ── Raw data table ──────────────────────────────────────────────────────
+    with st.expander("Show raw pace data"):
+        display = pace_series.copy()
+        display["snapshot_date"] = display["snapshot_date"].dt.strftime("%d %b %Y")
+        st.dataframe(display.rename(columns={metric: metric_label}),
+                     use_container_width=True, hide_index=True)
 
 
 # ── Tab: Forecasting ──────────────────────────────────────────────────────────
