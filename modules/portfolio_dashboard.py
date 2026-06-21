@@ -129,6 +129,86 @@ def tab_overview(df: pd.DataFrame) -> None:
             fig.update_layout(title=f"Portfolio RevPAR by {group_by}", **_DARK)
             st.plotly_chart(fig, use_container_width=True)
 
+    # ── Monthly KPI table (always Monthly, regardless of chart grouping) ──────
+    st.markdown("---")
+    st.markdown("#### 📋 Monthly KPI Summary — All Hotels")
+
+    monthly = kpi_engine.rm_aggregate(
+        kpi_engine.add_period_col(current, "date", "Monthly"),
+        ["period", "period_label"],
+    ).sort_values("period")
+
+    if not monthly.empty:
+        # Build display table with formatted columns
+        display_cols = {
+            "period_label":   "Month",
+            "rooms_sold":     "Rooms Sold",
+            "rooms_available":"Rooms Available",
+            "occupancy_pct":  "Occupancy %",
+            "adr":            "ADR (€)",
+            "revpar":         "RevPAR (€)",
+            "revenue":        "Revenue (€)",
+        }
+        existing = {k: v for k, v in display_cols.items() if k in monthly.columns}
+        tbl = monthly[list(existing.keys())].copy()
+        tbl = tbl.rename(columns=existing)
+
+        # Format numeric columns
+        def _fmt_col(series, col_name):
+            if "%" in col_name:
+                return series.map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
+            if "€" in col_name:
+                return series.map(lambda x: f"€{x:,.2f}" if pd.notna(x) else "—")
+            return series.map(lambda x: f"{int(x):,}" if pd.notna(x) else "—")
+
+        for col in tbl.columns:
+            if col != "Month":
+                tbl[col] = _fmt_col(tbl[col], col)
+
+        # Totals / averages footer
+        footer = {"Month": "TOTAL / AVG"}
+        for raw_col, display_col in existing.items():
+            if raw_col == "period_label":
+                continue
+            col_data = monthly[raw_col].dropna()
+            if raw_col in ("rooms_sold", "rooms_available", "revenue"):
+                footer[display_col] = f"{'€' if raw_col == 'revenue' else ''}{col_data.sum():,.0f}"
+            elif raw_col == "occupancy_pct":
+                # Correct: re-derive from totals
+                tot_rs = monthly["rooms_sold"].sum()   if "rooms_sold"      in monthly.columns else 0
+                tot_ra = monthly["rooms_available"].sum() if "rooms_available" in monthly.columns else 0
+                footer[display_col] = f"{(tot_rs / tot_ra * 100):.1f}%" if tot_ra > 0 else "—"
+            elif raw_col == "adr":
+                tot_rev = monthly["revenue"].sum()     if "revenue"    in monthly.columns else 0
+                tot_rs  = monthly["rooms_sold"].sum()  if "rooms_sold" in monthly.columns else 0
+                footer[display_col] = f"€{(tot_rev / tot_rs):.2f}" if tot_rs > 0 else "—"
+            elif raw_col == "revpar":
+                tot_rev = monthly["revenue"].sum()     if "revenue"         in monthly.columns else 0
+                tot_ra  = monthly["rooms_available"].sum() if "rooms_available" in monthly.columns else 0
+                footer[display_col] = f"€{(tot_rev / tot_ra):.2f}" if tot_ra > 0 else "—"
+
+        footer_df = pd.DataFrame([footer])
+        full_table = pd.concat([tbl, footer_df], ignore_index=True)
+
+        st.dataframe(
+            full_table,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Month": st.column_config.TextColumn("Month", width="medium")},
+        )
+
+        # Export
+        export_tbl = monthly[list(existing.keys())].rename(columns=existing).copy()
+        buf = __import__("io").BytesIO()
+        export_tbl.to_excel(buf, index=False, engine="openpyxl")
+        buf.seek(0)
+        st.download_button(
+            "⬇️ Export Monthly KPI Table to Excel",
+            data=buf.getvalue(),
+            file_name="portfolio_monthly_kpis.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
 
 # ── Tab: Rankings ─────────────────────────────────────────────────────────────
 
