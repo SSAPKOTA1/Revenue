@@ -139,127 +139,156 @@ def tab_overview(df: pd.DataFrame) -> None:
         st.info("No data to display.")
         return
 
+    # Build prior-year aggregation for side-by-side comparison
+    bv_charts = kpi_engine.best_view(df) if snaps else df.copy()
+    bv_charts["date"] = pd.to_datetime(bv_charts["date"], errors="coerce")
+    bv_charts["year"] = bv_charts["date"].dt.year
+    all_yrs    = sorted(bv_charts["year"].dropna().unique().astype(int), reverse=True)
+    chart_cur  = all_yrs[0] if all_yrs else None
+    chart_prev = all_yrs[1] if len(all_yrs) > 1 else None
+
+    agg_prev = pd.DataFrame()
+    if chart_prev is not None:
+        agg_prev = kpi_engine.rm_aggregate(
+            kpi_engine.add_period_col(
+                bv_charts[bv_charts["year"] == chart_prev], "date", group_by
+            ),
+            ["period", "period_label"],
+        ).sort_values("period")
+
+    def _side_by_side_bar(metric, fmt_fn, title, color_cur, color_prev):
+        fig = go.Figure()
+        if not agg_prev.empty and metric in agg_prev.columns:
+            fig.add_trace(go.Bar(
+                x=agg_prev["period_label"], y=agg_prev[metric],
+                name=str(chart_prev),
+                marker_color=color_prev, opacity=0.75,
+                text=[fmt_fn(v) for v in agg_prev[metric]],
+                textposition="outside",
+            ))
+        if metric in agg.columns:
+            fig.add_trace(go.Bar(
+                x=agg["period_label"], y=agg[metric],
+                name=str(chart_cur),
+                marker_color=color_cur,
+                text=[fmt_fn(v) for v in agg[metric]],
+                textposition="outside",
+            ))
+        fig.update_layout(barmode="group", title=title,
+                          hovermode="x unified", **_DARK)
+        return fig
+
     col1, col2 = st.columns(2)
     with col1:
         if "occupancy_pct" in agg.columns:
-            fig = go.Figure(go.Bar(
-                x=agg["period_label"], y=agg["occupancy_pct"],
-                marker_color=BRAND_COLORS["secondary"],
-                text=[f"{v:.1f}%" for v in agg["occupancy_pct"]],
-                textposition="outside",
-            ))
-            fig.update_layout(title=f"Portfolio Occupancy % by {group_by}", **_DARK)
+            fig = _side_by_side_bar(
+                "occupancy_pct", lambda v: f"{v:.1f}%",
+                f"Occupancy % by {group_by} — {chart_cur} vs {chart_prev}",
+                BRAND_COLORS["secondary"], "rgba(148,163,184,0.6)",
+            )
             st.plotly_chart(fig, use_container_width=True)
     with col2:
         if "revenue" in agg.columns:
-            fig = go.Figure(go.Bar(
-                x=agg["period_label"], y=agg["revenue"],
-                marker_color=BRAND_COLORS["success"],
-                text=[f"€{v/1000:,.0f}k" for v in agg["revenue"]],
-                textposition="outside",
-            ))
-            fig.update_layout(title=f"Portfolio Revenue by {group_by}", **_DARK)
+            fig = _side_by_side_bar(
+                "revenue", lambda v: f"€{v/1000:,.0f}k",
+                f"Revenue by {group_by} — {chart_cur} vs {chart_prev}",
+                BRAND_COLORS["success"], "rgba(148,163,184,0.6)",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
     col3, col4 = st.columns(2)
     with col3:
         if "adr" in agg.columns:
-            fig = go.Figure(go.Scatter(
-                x=agg["period_label"], y=agg["adr"],
-                mode="lines+markers",
-                line=dict(color=BRAND_COLORS["accent"], width=2),
-                marker=dict(size=7),
-            ))
-            fig.update_layout(title=f"Portfolio ADR by {group_by}", **_DARK)
+            fig = _side_by_side_bar(
+                "adr", lambda v: f"€{v:,.0f}",
+                f"ADR by {group_by} — {chart_cur} vs {chart_prev}",
+                BRAND_COLORS["accent"], "rgba(148,163,184,0.6)",
+            )
             st.plotly_chart(fig, use_container_width=True)
     with col4:
         if "revpar" in agg.columns:
-            fig = go.Figure(go.Scatter(
-                x=agg["period_label"], y=agg["revpar"],
-                mode="lines+markers",
-                line=dict(color=BRAND_COLORS["warning"], width=2),
-                marker=dict(size=7),
-            ))
-            fig.update_layout(title=f"Portfolio RevPAR by {group_by}", **_DARK)
+            fig = _side_by_side_bar(
+                "revpar", lambda v: f"€{v:,.0f}",
+                f"RevPAR by {group_by} — {chart_cur} vs {chart_prev}",
+                BRAND_COLORS["warning"], "rgba(148,163,184,0.6)",
+            )
             st.plotly_chart(fig, use_container_width=True)
 
     # ── Monthly KPI table (always Monthly, regardless of chart grouping) ──────
     st.markdown("---")
-    st.markdown("#### 📋 Monthly KPI Summary — All Hotels")
 
+    bv = kpi_engine.best_view(df) if snaps else df.copy()
+    bv["date"] = pd.to_datetime(bv["date"], errors="coerce")
+    bv["year"]  = bv["date"].dt.year
+
+    all_years = sorted(bv["year"].dropna().unique().astype(int), reverse=True)
+    cur_year  = all_years[0]  if all_years else pd.Timestamp.today().year
+    prev_year = all_years[1]  if len(all_years) > 1 else cur_year - 1
+
+    st.markdown(f"#### 📋 {cur_year} Monthly KPIs  ·  vs {prev_year} Full-Year Total")
+
+    # Current year — month by month
+    cy_df = bv[bv["year"] == cur_year].copy()
     monthly = kpi_engine.rm_aggregate(
-        kpi_engine.add_period_col(current, "date", "Monthly"),
+        kpi_engine.add_period_col(cy_df, "date", "Monthly"),
         ["period", "period_label"],
     ).sort_values("period")
 
+    # Prior year — single total row
+    py_df  = bv[bv["year"] == prev_year].copy()
+    py_tot = kpi_engine._kpis_from_df(py_df)
+
+    def _f(v, kind):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "—"
+        if kind == "pct":   return f"{v:.1f}%"
+        if kind == "rate":  return f"€{v:,.2f}"
+        if kind == "rev":   return f"€{v:,.0f}"
+        return f"{int(v):,}"
+
+    KPI_DEFS = [
+        ("rooms_sold",      "Rooms Sold",       "int"),
+        ("rooms_available", "Avail Rooms",       "int"),
+        ("occupancy_pct",   "Occupancy %",       "pct"),
+        ("adr",             "ADR (€)",           "rate"),
+        ("revpar",          "RevPAR (€)",        "rate"),
+        ("revenue",         "Revenue (€)",       "rev"),
+    ]
+
     if not monthly.empty:
-        # Build display table with formatted columns
-        display_cols = {
-            "period_label":   "Month",
-            "rooms_sold":     "Rooms Sold",
-            "rooms_available":"Rooms Available",
-            "occupancy_pct":  "Occupancy %",
-            "adr":            "ADR (€)",
-            "revpar":         "RevPAR (€)",
-            "revenue":        "Revenue (€)",
-        }
-        existing = {k: v for k, v in display_cols.items() if k in monthly.columns}
-        tbl = monthly[list(existing.keys())].copy()
-        tbl = tbl.rename(columns=existing)
+        rows = []
+        for _, r in monthly.iterrows():
+            row = {"Month": r["period_label"]}
+            for raw, label, kind in KPI_DEFS:
+                if raw in monthly.columns:
+                    row[label]          = _f(r[raw], kind)
+            rows.append(row)
 
-        # Format numeric columns
-        def _fmt_col(series, col_name):
-            if "%" in col_name:
-                return series.map(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
-            if "€" in col_name:
-                return series.map(lambda x: f"€{x:,.2f}" if pd.notna(x) else "—")
-            return series.map(lambda x: f"{int(x):,}" if pd.notna(x) else "—")
+        # TOTAL row for current year (re-derived correctly)
+        total_row = {"Month": f"▶ {cur_year} Total"}
+        for raw, label, kind in KPI_DEFS:
+            if raw in monthly.columns:
+                total_row[label] = _f(kpi_engine._kpis_from_df(cy_df).get(raw), kind)
+        rows.append(total_row)
 
-        for col in tbl.columns:
-            if col != "Month":
-                tbl[col] = _fmt_col(tbl[col], col)
+        # Prior year total row
+        py_row = {"Month": f"◀ {prev_year} Full Year"}
+        for raw, label, kind in KPI_DEFS:
+            if raw in monthly.columns:
+                py_row[label] = _f(py_tot.get(raw), kind)
+        rows.append(py_row)
 
-        # Totals / averages footer
-        footer = {"Month": "TOTAL / AVG"}
-        for raw_col, display_col in existing.items():
-            if raw_col == "period_label":
-                continue
-            col_data = monthly[raw_col].dropna()
-            if raw_col in ("rooms_sold", "rooms_available", "revenue"):
-                footer[display_col] = f"{'€' if raw_col == 'revenue' else ''}{col_data.sum():,.0f}"
-            elif raw_col == "occupancy_pct":
-                # Correct: re-derive from totals
-                tot_rs = monthly["rooms_sold"].sum()   if "rooms_sold"      in monthly.columns else 0
-                tot_ra = monthly["rooms_available"].sum() if "rooms_available" in monthly.columns else 0
-                footer[display_col] = f"{(tot_rs / tot_ra * 100):.1f}%" if tot_ra > 0 else "—"
-            elif raw_col == "adr":
-                tot_rev = monthly["revenue"].sum()     if "revenue"    in monthly.columns else 0
-                tot_rs  = monthly["rooms_sold"].sum()  if "rooms_sold" in monthly.columns else 0
-                footer[display_col] = f"€{(tot_rev / tot_rs):.2f}" if tot_rs > 0 else "—"
-            elif raw_col == "revpar":
-                tot_rev = monthly["revenue"].sum()     if "revenue"         in monthly.columns else 0
-                tot_ra  = monthly["rooms_available"].sum() if "rooms_available" in monthly.columns else 0
-                footer[display_col] = f"€{(tot_rev / tot_ra):.2f}" if tot_ra > 0 else "—"
-
-        footer_df = pd.DataFrame([footer])
-        full_table = pd.concat([tbl, footer_df], ignore_index=True)
-
-        st.dataframe(
-            full_table,
-            use_container_width=True,
-            hide_index=True,
-            column_config={"Month": st.column_config.TextColumn("Month", width="medium")},
-        )
+        tbl = pd.DataFrame(rows)
+        st.dataframe(tbl, use_container_width=True, hide_index=True)
 
         # Export
-        export_tbl = monthly[list(existing.keys())].rename(columns=existing).copy()
         buf = __import__("io").BytesIO()
-        export_tbl.to_excel(buf, index=False, engine="openpyxl")
+        tbl.to_excel(buf, index=False, engine="openpyxl")
         buf.seek(0)
         st.download_button(
-            "⬇️ Export Monthly KPI Table to Excel",
+            f"⬇️ Export {cur_year} vs {prev_year} KPI Table",
             data=buf.getvalue(),
-            file_name="portfolio_monthly_kpis.xlsx",
+            file_name=f"monthly_kpis_{cur_year}_vs_{prev_year}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
