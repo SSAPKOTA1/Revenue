@@ -24,6 +24,7 @@ from config.settings import (
     APP_TITLE, APP_ICON, APP_VERSION,
     LOG_FILE, OUTPUT_DIR,
     FORECAST_HORIZONS, FORECAST_METHODS,
+    DEFAULT_DATA_FOLDER,
 )
 from modules import (
     data_loader, data_validator, data_cleaner,
@@ -100,23 +101,20 @@ def render_sidebar(df: pd.DataFrame) -> dict:
         # ── Folder selection ───────────────────────────────────────────────
         st.markdown("### 📁 Data Source")
         st.caption(
-            "Enter the **main/root folder** path. "
-            "The app will automatically scan all subfolders "
-            "(year → month → day → hotel files)."
+            "The app scans **all subfolders** automatically. "
+            "Just point it at the root folder."
         )
+        # Use saved folder, then default from config, then empty
+        _default_folder = st.session_state.get("last_folder", DEFAULT_DATA_FOLDER or "")
         folder_input = st.text_input(
             "Root Data Folder",
-            value=st.session_state.get("last_folder", ""),
-            placeholder="/path/to/your/data/root",
+            value=_default_folder,
+            placeholder=r"U:\Your\Data\Folder",
             help=(
-                "Absolute path to the top-level folder. "
-                "Expected layout:\n"
-                "  root/\n"
-                "    2024/\n"
-                "      January/\n"
-                "        01/\n"
-                "          HotelName.xlsx\n"
-                "Any nesting depth is supported."
+                "Full path to your root data folder.\n"
+                "All subfolders are scanned automatically.\n\n"
+                "Example:\n"
+                r"U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
             ),
         )
         load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True, type="primary")
@@ -381,6 +379,8 @@ def main() -> None:
         st.session_state["file_reports"] = []
     if "demo_loaded" not in st.session_state:
         st.session_state["demo_loaded"] = False
+    if "auto_load_done" not in st.session_state:
+        st.session_state["auto_load_done"] = False
 
     df: pd.DataFrame = st.session_state["df"]
     file_reports: list[dict] = st.session_state["file_reports"]
@@ -388,7 +388,27 @@ def main() -> None:
     # ── Sidebar controls ───────────────────────────────────────────────────
     sel = render_sidebar(df)
 
-    # ── Load demo data on first run (only when no folder provided) ────────────
+    # ── Auto-load from DEFAULT_DATA_FOLDER on first startup ───────────────
+    if not st.session_state["auto_load_done"] and df.empty:
+        auto_folder = (DEFAULT_DATA_FOLDER or "").strip()
+        if auto_folder and Path(auto_folder).exists():
+            with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
+                try:
+                    new_df, new_reports = load_data(auto_folder)
+                    if not new_df.empty:
+                        new_df = data_cleaner.clean(new_df)
+                        st.session_state["df"] = new_df
+                        st.session_state["file_reports"] = new_reports
+                        st.session_state["last_folder"] = auto_folder
+                        st.session_state["demo_loaded"] = True
+                        df = new_df
+                        file_reports = new_reports
+                        logger.info("Auto-loaded %d rows from default folder", len(new_df))
+                except Exception as e:
+                    logger.error("Auto-load failed: %s", e)
+        st.session_state["auto_load_done"] = True
+
+    # ── Load demo data only if no real data and no default folder ─────────
     if not st.session_state["demo_loaded"] and df.empty and not sel["folder"].strip():
         with st.spinner("Loading demo data (14 hotels, 365 days each)…"):
             demo_df = _generate_demo_data()

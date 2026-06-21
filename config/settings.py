@@ -18,6 +18,12 @@ APP_TITLE = "Hotel Revenue Management Analytics Platform"
 APP_ICON = "🏨"
 APP_VERSION = "1.0.0"
 
+# ── Default Data Folder ────────────────────────────────────────────────────
+# Set this to your root data folder. The app will auto-load on startup.
+# Use raw string (r"...") or double backslashes for Windows paths.
+# Set to "" or None to disable auto-load.
+DEFAULT_DATA_FOLDER = r"U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
+
 # ── Column Mapping ─────────────────────────────────────────────────────────
 # Maps raw column names (lowercased, stripped) → canonical internal names
 COLUMN_MAP: dict[str, str] = {
