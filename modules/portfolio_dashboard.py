@@ -42,23 +42,64 @@ def _safe(v, default=0.0):
         return default
 
 
-def _kpi_row(df: pd.DataFrame) -> None:
-    # Compute totals directly from the DataFrame — never rely on pre-aggregated KPI values
-    rs  = float(df["rooms_sold"].sum())      if "rooms_sold"      in df.columns else 0.0
-    ra  = float(df["rooms_available"].sum()) if "rooms_available" in df.columns else 0.0
-    rev = float(df["revenue"].sum())         if "revenue"         in df.columns else 0.0
-    occ = (rs / ra * 100) if ra > 0 else 0.0
-    adr = (rev / rs)      if rs > 0 else 0.0
-    rp  = (rev / ra)      if ra > 0 else 0.0
-    n_hotels = int(df["hotel_name"].nunique()) if "hotel_name" in df.columns else 0
+def _metric_block(label: str, closed_val, open_val, fmt: str, col) -> None:
+    """Render one KPI with Closed / Open split inside a card."""
+    closed_str = fmt.format(closed_val)
+    open_str   = fmt.format(open_val)
+    col.markdown(
+        f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
+            border-radius:10px;padding:14px 16px;text-align:center;
+            border:1px solid rgba(255,255,255,0.08);'>
+          <p style='margin:0 0 6px;font-size:11px;color:#94a3b8;letter-spacing:1px;
+                    text-transform:uppercase'>{label}</p>
+          <div style='display:flex;justify-content:space-around;gap:6px;'>
+            <div>
+              <p style='margin:0;font-size:9px;color:#64748b;text-transform:uppercase'>
+                ✅ Closed</p>
+              <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#34d399'>
+                {closed_str}</p>
+            </div>
+            <div style='border-left:1px solid rgba(255,255,255,0.1)'></div>
+            <div>
+              <p style='margin:0;font-size:9px;color:#64748b;text-transform:uppercase'>
+                📋 Open</p>
+              <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#60a5fa'>
+                {open_str}</p>
+            </div>
+          </div>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
-    cols = st.columns(6)
-    _card("Hotels",     str(n_hotels),            cols[0])
-    _card("Occupancy",  f"{occ:.1f}%",            cols[1])
-    _card("ADR",        f"€{adr:,.2f}",           cols[2])
-    _card("RevPAR",     f"€{rp:,.2f}",            cols[3])
-    _card("Revenue",    f"€{rev:,.0f}",           cols[4])
-    _card("Rooms Sold", f"{int(rs):,}",           cols[5])
+
+def _kpi_row(df: pd.DataFrame) -> None:
+    """KPI cards split into Closed (past dates) and Open (future on-books)."""
+    closed_df, open_df = kpi_engine.split_closed_open(df)
+    c = kpi_engine._kpis_from_df(closed_df)
+    o = kpi_engine._kpis_from_df(open_df)
+
+    n_hotels = int(df["hotel_name"].nunique()) if "hotel_name" in df.columns else 0
+    today = pd.Timestamp.today()
+
+    st.markdown(
+        f"<p style='font-size:0.78rem;color:#64748b;margin-bottom:6px;'>"
+        f"✅ <b>Closed</b> = arrival dates up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')} (actuals) &nbsp;·&nbsp; "
+        f"📋 <b>Open</b> = from {today.strftime('%d %b %Y')} onwards (on-books)</p>",
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(5)
+    _metric_block("Occupancy %",  c["occupancy_pct"], o["occupancy_pct"], "{:.1f}%",   cols[0])
+    _metric_block("ADR",          c["adr"],           o["adr"],           "€{:,.2f}",  cols[1])
+    _metric_block("RevPAR",       c["revpar"],        o["revpar"],        "€{:,.2f}",  cols[2])
+    _metric_block("Revenue",      c["revenue"],       o["revenue"],       "€{:,.0f}",  cols[3])
+    _metric_block("Rooms Sold",   c["rooms_sold"],    o["rooms_sold"],    "{:,.0f}",   cols[4])
+
+    # Hotels count — single value
+    st.markdown(
+        f"<p style='font-size:0.8rem;color:#94a3b8;margin-top:4px;'>🏨 {n_hotels} hotels</p>",
+        unsafe_allow_html=True,
+    )
 
 
 # ── Tab: Overview ─────────────────────────────────────────────────────────────

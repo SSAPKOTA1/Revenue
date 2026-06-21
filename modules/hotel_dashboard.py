@@ -59,20 +59,53 @@ def _kpi_card(label: str, value: str, delta: Optional[str] = None, delta_pos: bo
     </div>"""
 
 
-def _kpi_row(kpis: dict) -> None:
-    cols = st.columns(5)
+def _kpi_row(df: pd.DataFrame) -> None:
+    """KPI cards split into Closed (past actuals) and Open (future on-books)."""
+    closed_df, open_df = kpi_engine.split_closed_open(df)
+    c = kpi_engine._kpis_from_df(closed_df)
+    o = kpi_engine._kpis_from_df(open_df)
+    today = pd.Timestamp.today()
+
+    st.markdown(
+        f"<p style='font-size:0.78rem;color:#64748b;margin-bottom:6px;'>"
+        f"✅ <b>Closed</b> = up to {(today - pd.Timedelta(days=1)).strftime('%d %b %Y')} &nbsp;·&nbsp; "
+        f"📋 <b>Open</b> = from {today.strftime('%d %b %Y')} on-books</p>",
+        unsafe_allow_html=True,
+    )
+
     items = [
-        ("Occupancy", "occupancy_pct", "{:.1f}%"),
-        ("ADR",       "adr",           "€{:,.2f}"),
-        ("RevPAR",    "revpar",        "€{:,.2f}"),
-        ("Revenue",   "revenue",       "€{:,.0f}"),
-        ("Rooms Sold","rooms_sold",    "{:,.0f}"),
+        ("Occupancy %", "occupancy_pct", "{:.1f}%"),
+        ("ADR",         "adr",           "€{:,.2f}"),
+        ("RevPAR",      "revpar",        "€{:,.2f}"),
+        ("Revenue",     "revenue",       "€{:,.0f}"),
+        ("Rooms Sold",  "rooms_sold",    "{:,.0f}"),
     ]
+    cols = st.columns(len(items))
     for col, (lbl, key, fmt) in zip(cols, items):
-        val = kpis.get(key, np.nan)
-        with col:
-            disp = fmt.format(val) if not pd.isna(val) else "N/A"
-            st.markdown(_kpi_card(lbl, disp), unsafe_allow_html=True)
+        cv = c.get(key, 0)
+        ov = o.get(key, 0)
+        col.markdown(
+            f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
+                border-radius:10px;padding:14px 16px;text-align:center;
+                border:1px solid rgba(255,255,255,0.08);'>
+              <p style='margin:0 0 6px;font-size:11px;color:#94a3b8;letter-spacing:1px;
+                        text-transform:uppercase'>{lbl}</p>
+              <div style='display:flex;justify-content:space-around;gap:4px;'>
+                <div>
+                  <p style='margin:0;font-size:9px;color:#64748b'>✅ Closed</p>
+                  <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#34d399'>
+                    {fmt.format(cv)}</p>
+                </div>
+                <div style='border-left:1px solid rgba(255,255,255,0.1)'></div>
+                <div>
+                  <p style='margin:0;font-size:9px;color:#64748b'>📋 Open</p>
+                  <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#60a5fa'>
+                    {fmt.format(ov)}</p>
+                </div>
+              </div>
+            </div>""",
+            unsafe_allow_html=True,
+        )
 
 
 def _bar(x, y_pos, y_neg=None, title="", x_title="", y_title="", labels_pos=None, labels_neg=None):
@@ -142,9 +175,7 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
         current = df.copy()
         st.caption("📅 No snapshots — showing all data combined")
 
-    # KPIs for the full current view
-    kpis = kpi_engine.hotel_kpis(current)
-    _kpi_row(kpis)
+    _kpi_row(current)
     st.markdown("---")
 
     # Controls
@@ -643,8 +674,7 @@ def tab_performance(df: pd.DataFrame) -> None:
     current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
     current["date"] = pd.to_datetime(current["date"], errors="coerce")
 
-    kpis = kpi_engine.hotel_kpis(current)
-    _kpi_row(kpis)
+    _kpi_row(current)
     st.markdown("---")
 
     c1, c2, c3, c4 = st.columns(2), st.columns(2), st.columns(2), st.columns(2)

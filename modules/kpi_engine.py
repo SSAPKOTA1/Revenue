@@ -73,6 +73,41 @@ def rm_aggregate(
     return out
 
 
+def split_closed_open(df: pd.DataFrame) -> tuple:
+    """
+    Split a DataFrame into Closed (arrival date < today) and Open (>= today).
+
+    Closed = dates that have already passed → actual results
+    Open   = future arrival dates still on the books
+
+    Returns (closed_df, open_df)
+    """
+    today = pd.Timestamp.today().normalize()
+    df2 = df.copy()
+    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
+    closed = df2[df2["date"] < today].copy()
+    open_  = df2[df2["date"] >= today].copy()
+    return closed, open_
+
+
+def _kpis_from_df(df: pd.DataFrame) -> dict:
+    """Compute KPI dict directly from a DataFrame slice."""
+    if df.empty:
+        return {"rooms_sold": 0, "rooms_available": 0, "revenue": 0,
+                "occupancy_pct": 0, "adr": 0, "revpar": 0}
+    rs  = float(df["rooms_sold"].sum())       if "rooms_sold"      in df.columns else 0.0
+    ra  = float(df["rooms_available"].sum())  if "rooms_available" in df.columns else 0.0
+    rev = float(df["revenue"].sum())          if "revenue"         in df.columns else 0.0
+    return {
+        "rooms_sold":      rs,
+        "rooms_available": ra,
+        "revenue":         rev,
+        "occupancy_pct":   (rs / ra * 100) if ra > 0 else 0.0,
+        "adr":             (rev / rs)       if rs > 0 else 0.0,
+        "revpar":          (rev / ra)       if ra > 0 else 0.0,
+    }
+
+
 def hotel_kpis(df: pd.DataFrame) -> dict:
     """Single-row KPI dict for KPI cards (works on any filtered slice)."""
     if df.empty:
