@@ -1,11 +1,12 @@
 """
-Hotel-level dashboard — 6 tabs:
+Hotel-level dashboard — 7 tabs:
   1. Current Position  — what's on books now for future arrival dates
   2. Pickup            — change between latest snapshot and a past snapshot
   3. Pace              — how did bookings for a selected arrival date build up
   4. Performance       — historical actuals (past arrival dates)
-  5. Forecast          — demand forecast
-  6. Anomalies         — outlier detection
+  5. YoY              — year-over-year monthly comparison
+  6. Forecast          — demand forecast
+  7. Anomalies         — outlier detection
 """
 
 import logging
@@ -903,6 +904,171 @@ def tab_anomalies(df: pd.DataFrame) -> None:
         st.success("✅ No anomalies detected in the current data.")
 
 
+_MONTH_ORDER = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+_MONTH_NUM   = {m: i+1 for i, m in enumerate(_MONTH_ORDER)}
+
+
+def tab_yoy(df: pd.DataFrame) -> None:
+    """Year-over-Year monthly comparison for a single hotel."""
+    st.subheader("📅 Year-over-Year Monthly Comparison")
+    st.caption("Uses best available snapshot per arrival date so past years show full-year closed actuals.")
+
+    if "date" not in df.columns:
+        st.info("No date column available.")
+        return
+
+    bv = kpi_engine.best_view(df)
+    bv["date"]       = pd.to_datetime(bv["date"], errors="coerce")
+    bv["year"]       = bv["date"].dt.year
+    bv["month"]      = bv["date"].dt.month
+    bv["month_abbr"] = bv["date"].dt.strftime("%b")
+
+    available_years = sorted(bv["year"].dropna().unique().astype(int), reverse=True)
+    if len(available_years) < 2:
+        st.warning("Need at least 2 years of data. Load 2024/2025 files first.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        year_cur  = st.selectbox("Current Year",     available_years, index=0, key="h_yoy_cur")
+    with c2:
+        prev_opts = [y for y in available_years if y != year_cur]
+        year_prev = st.selectbox("Comparison Year",  prev_opts,       index=0, key="h_yoy_prev")
+    with c3:
+        metric = st.selectbox(
+            "Primary metric",
+            [m for m in ["revenue", "rooms_sold", "occupancy_pct", "adr", "revpar"] if m in bv.columns],
+            key="h_yoy_metric",
+        )
+
+    metric_label = metric.replace("_", " ").title()
+
+    cur_df  = bv[bv["year"] == year_cur]
+    prev_df = bv[bv["year"] == year_prev]
+
+    def _monthly(frame):
+        return kpi_engine.rm_aggregate(frame, ["month", "month_abbr"]).sort_values("month")
+
+    cur_m  = _monthly(cur_df)
+    prev_m = _monthly(prev_df)
+
+    if cur_m.empty and prev_m.empty:
+        st.warning("No data found for the selected years.")
+        return
+
+    def _total(frame, col):
+        if frame.empty or col not in frame.columns:
+            return 0.0
+        if col in ("revenue", "rooms_sold", "rooms_available"):
+            return float(frame[col].sum())
+        rs  = frame["rooms_sold"].sum()      if "rooms_sold"      in frame.columns else 0
+        ra  = frame["rooms_available"].sum() if "rooms_available" in frame.columns else 0
+        rev = frame["revenue"].sum()         if "revenue"         in frame.columns else 0
+        if col == "occupancy_pct": return (rs / ra * 100) if ra > 0 else 0.0
+        if col == "adr":           return (rev / rs)       if rs > 0 else 0.0
+        if col == "revpar":        return (rev / ra)       if ra > 0 else 0.0
+        return 0.0
+
+    # ── KPI summary cards ─────────────────────────────────────────────────────
+    metrics_show = [m for m in ["revenue", "rooms_sold", "occupancy_pct", "adr", "revpar"]
+                    if m in bv.columns]
+    cols = st.columns(len(metrics_show))
+    for col_w, m in zip(cols, metrics_show):
+        v_cur  = _total(cur_m,  m)
+        v_prev = _total(prev_m, m)
+        chg    = ((v_cur - v_prev) / abs(v_prev) * 100) if v_prev else 0.0
+        col_w.metric(
+            label=m.replace("_", " ").title(),
+            value=_fmt(v_cur, m),
+            delta=f"{chg:+.1f}%  vs {year_prev}",
+            delta_color="normal" if chg >= 0 else "inverse",
+        )
+
+    st.markdown("---")
+
+    # ── Grouped bar chart ─────────────────────────────────────────────────────
+    cur_vals, prev_vals = [], []
+    for mn in _MONTH_ORDER:
+        mn_num = _MONTH_NUM[mn]
+        cr = cur_m[cur_m["month"]  == mn_num]
+        pr = prev_m[prev_m["month"] == mn_num]
+        cur_vals.append( _total(cr, metric) if not cr.empty  else 0.0)
+        prev_vals.append(_total(pr, metric) if not pr.empty else 0.0)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=_MONTH_ORDER, y=prev_vals, name=str(year_prev),
+        marker_color="rgba(148,163,184,0.8)",
+        text=[_fmt(v, metric) for v in prev_vals], textposition="outside",
+        hovertemplate=f"%{{x}} {year_prev}<br>{metric_label}: %{{y:,.2f}}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=_MONTH_ORDER, y=cur_vals, name=str(year_cur),
+        marker_color=BRAND_COLORS["secondary"],
+        text=[_fmt(v, metric) for v in cur_vals], textposition="outside",
+        hovertemplate=f"%{{x}} {year_cur}<br>{metric_label}: %{{y:,.2f}}<extra></extra>",
+    ))
+    fig.update_layout(
+        barmode="group",
+        title=f"{metric_label} — {year_cur} vs {year_prev}",
+        xaxis_title="Month", yaxis_title=metric_label,
+        hovermode="x unified", **_DARK,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── YoY % change bar chart ────────────────────────────────────────────────
+    pct_changes = [((c - p) / abs(p) * 100) if p else 0.0
+                   for c, p in zip(cur_vals, prev_vals)]
+    fig2 = go.Figure()
+    fig2.add_hline(y=0, line_color="rgba(255,255,255,0.2)", line_dash="dot")
+    fig2.add_trace(go.Bar(
+        x=_MONTH_ORDER, y=pct_changes,
+        marker_color=[BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"]
+                      for v in pct_changes],
+        text=[f"{v:+.1f}%" for v in pct_changes], textposition="outside",
+        hovertemplate="%{x}<br>YoY Change: %{y:+.1f}%<extra></extra>",
+    ))
+    fig2.update_layout(
+        title=f"{metric_label} YoY Change % ({year_cur} vs {year_prev})",
+        xaxis_title="Month", yaxis_title="Change %",
+        showlegend=False, **_DARK,
+    )
+    st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Full monthly KPI table ────────────────────────────────────────────────
+    st.markdown("#### Monthly KPI Table")
+    kpi_cols = [m for m in ["revenue", "rooms_sold", "occupancy_pct", "adr", "revpar"]
+                if m in bv.columns]
+
+    rows = []
+    for mn in _MONTH_ORDER:
+        mn_num = _MONTH_NUM[mn]
+        cr = cur_m[cur_m["month"]  == mn_num]
+        pr = prev_m[prev_m["month"] == mn_num]
+        row = {"Month": mn}
+        for col in kpi_cols:
+            vc = _total(cr, col)
+            vp = _total(pr, col)
+            ch = ((vc - vp) / abs(vp) * 100) if vp else 0.0
+            row[f"{col} {year_cur}"]  = _fmt(vc, col)
+            row[f"{col} {year_prev}"] = _fmt(vp, col)
+            row[f"{col} Δ%"]          = f"{ch:+.1f}%"
+        rows.append(row)
+
+    tbl = pd.DataFrame(rows)
+    st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+    from modules import exports as _exp
+    excel = _exp.to_excel_bytes({"YoY": tbl})
+    if excel:
+        st.download_button(
+            f"⬇️ Export YoY Table ({year_cur} vs {year_prev})",
+            excel,
+            file_name=f"yoy_{year_cur}_vs_{year_prev}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def render(
@@ -945,6 +1111,7 @@ def render(
         "📈 Pickup",
         "⏱️ Pace",
         "📊 Performance",
+        "📅 YoY",
         "🔮 Forecast",
         "⚠️ Anomalies",
     ])
@@ -958,6 +1125,8 @@ def render(
     with tabs[3]:
         tab_performance(hotel_df)
     with tabs[4]:
-        tab_forecast(hotel_df, fc_method, fc_horizon)
+        tab_yoy(hotel_df)
     with tabs[5]:
+        tab_forecast(hotel_df, fc_method, fc_horizon)
+    with tabs[6]:
         tab_anomalies(hotel_df)
