@@ -409,7 +409,10 @@ def scan_folder(root: str | Path) -> list[Path]:
     found = []
     for glob_pat in ('*.xlsx', '*.xls', '*.csv'):
         for p in root.rglob(glob_pat):
+            # Skip hidden dirs, pycache, and Excel temp files (~$filename.xlsx)
             if any(part.startswith('.') or part == '__pycache__' for part in p.parts):
+                continue
+            if p.name.startswith('~$'):
                 continue
             found.append(p)
 

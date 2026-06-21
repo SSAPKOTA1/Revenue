@@ -194,12 +194,14 @@ def ingest_new_files(
                     continue
 
                 df["snapshot_date"] = snap_date
+                # Use full path as source key so same-named files in different
+                # year/month folders don't overwrite each other
+                df["_source_file"] = str(fp)
                 df = data_cleaner.clean(df)
 
-                # Remove any existing rows from this file before re-inserting
-                # (handles modified files — delete old rows, insert fresh)
+                # Delete previous rows for this exact file path before re-inserting
                 con.execute(
-                    f"DELETE FROM {_TABLE} WHERE _source_file = ?", (fp.name,)
+                    f"DELETE FROM {_TABLE} WHERE _source_file = ?", (str(fp),)
                 )
 
                 _df_to_sql(df, con)

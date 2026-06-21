@@ -322,6 +322,27 @@ def _sidebar(df: pd.DataFrame) -> dict:
         force_btn = st.button("⚡ Force Full Rebuild",    use_container_width=True,
                               help="Re-parse ALL files from scratch.")
 
+        # One-time migration: old DB used filename-only as source key;
+        # new code uses full path so same-named files in different year
+        # folders don't overwrite each other.  Detect and prompt rebuild.
+        if cache_manager.SQLITE_FILE.exists():
+            try:
+                import sqlite3 as _sq
+                with _sq.connect(str(cache_manager.SQLITE_FILE)) as _c:
+                    sample = _c.execute(
+                        "SELECT _source_file FROM master LIMIT 1"
+                    ).fetchone()
+                if sample and sample[0] and '/' not in sample[0] and '\\' not in sample[0]:
+                    st.warning(
+                        "⚠️ **One-time rebuild needed.**\n\n"
+                        "The cache was built with an older version that could mix up "
+                        "files with the same name from different years. "
+                        "Click **⚡ Force Full Rebuild** once to fix this.",
+                        icon=None,
+                    )
+            except Exception:
+                pass
+
         # ── Cache info ─────────────────────────────────────────────────────
         info = cache_manager.get_cache_info()
         if info:
