@@ -108,7 +108,9 @@ def _kpi_row(df: pd.DataFrame) -> None:
 
 def tab_overview(df: pd.DataFrame) -> None:
     snaps = kpi_engine.get_snapshots(df)
-    current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    # best_view: for each (hotel, date) keeps the latest snapshot row
+    # → past years show full-year actuals; current year shows latest on-books
+    current = kpi_engine.best_view(df) if snaps else df.copy()
     latest_label = f" (as of {pd.Timestamp(snaps[-1]).strftime('%d %b %Y')})" if snaps else ""
 
     st.caption(f"Portfolio KPIs{latest_label}")
@@ -261,7 +263,7 @@ def tab_rankings(df: pd.DataFrame) -> None:
         st.info("No hotel dimension available.")
         return
 
-    current = kpi_engine.latest_snapshot_view(df) if kpi_engine.get_snapshots(df) else df.copy()
+    current = kpi_engine.best_view(df) if kpi_engine.get_snapshots(df) else df.copy()
 
     rank_metric = st.selectbox(
         "Rank by",
@@ -653,7 +655,7 @@ def tab_company(df: pd.DataFrame) -> None:
     st.subheader("🏢 Company (Firma) Analysis")
 
     snaps = kpi_engine.get_snapshots(df)
-    current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    current = kpi_engine.best_view(df) if snaps else df.copy()
 
     # ── Month selector ────────────────────────────────────────────────────────
     current = kpi_engine.add_period_col(current, "date", "Monthly")
@@ -767,7 +769,7 @@ def tab_company(df: pd.DataFrame) -> None:
     # ── Multi-month trend per company ─────────────────────────────────────────
     st.markdown("#### Revenue Trend by Company (all months)")
     df_all = _assign_company(kpi_engine.add_period_col(
-        kpi_engine.latest_snapshot_view(df) if snaps else df.copy(),
+        kpi_engine.best_view(df) if snaps else df.copy(),
         "date", "Monthly"
     ))
     trend = kpi_engine.rm_aggregate(df_all, ["company", "period", "period_label"]).sort_values("period")
@@ -1019,7 +1021,7 @@ def tab_yoy(df: pd.DataFrame) -> None:
 
 def tab_anomalies(df: pd.DataFrame) -> None:
     st.subheader("Portfolio Anomaly Detection")
-    current = kpi_engine.latest_snapshot_view(df) if kpi_engine.get_snapshots(df) else df.copy()
+    current = kpi_engine.best_view(df) if kpi_engine.get_snapshots(df) else df.copy()
     daily = kpi_engine.rm_aggregate(current, ["date"]).sort_values("date")
 
     flagged = anomaly_detection.detect_anomalies(daily)

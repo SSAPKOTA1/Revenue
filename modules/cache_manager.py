@@ -229,6 +229,7 @@ def ingest_new_files(
                 progress_callback((i + 1) / len(new_files))
 
         con.commit()
+        compact_past_years(con)
         _update_meta(con, source_folder)
 
     logger.info("Incremental ingest done: +%d rows, %d errors", rows_added, errors)
@@ -239,6 +240,38 @@ def ingest_new_files(
         "total_rows_added": rows_added,
         "file_reports": file_reports,
     }
+
+
+def compact_past_years(con: sqlite3.Connection) -> int:
+    """
+    For arrival dates in years before the current year, keep only the row
+    with the LATEST snapshot_date per (hotel_name, date).
+
+    Past-year dates are 100% closed — their final value is the latest
+    snapshot that covered them.  Older snapshots for those same dates
+    are redundant and waste space / slow queries.
+
+    Returns the number of rows deleted.
+    """
+    from datetime import date
+    current_year_start = f"{date.today().year}-01-01"
+
+    # Find rows to delete: past-year dates where a newer snapshot exists
+    # for the same (hotel_name, date) pair.
+    result = con.execute(f"""
+        DELETE FROM {_TABLE}
+        WHERE date < ?
+          AND snapshot_date != (
+              SELECT MAX(m2.snapshot_date)
+              FROM   {_TABLE} m2
+              WHERE  m2.hotel_name = {_TABLE}.hotel_name
+                AND  m2.date       = {_TABLE}.date
+          )
+    """, (current_year_start,))
+    deleted = result.rowcount
+    con.commit()
+    logger.info("compact_past_years: removed %d redundant past-year rows", deleted)
+    return deleted
 
 
 def full_rebuild(source_folder: str, progress_callback=None) -> dict:

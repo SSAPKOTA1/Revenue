@@ -671,13 +671,15 @@ def tab_performance(df: pd.DataFrame) -> None:
     """Historical performance — aggregated from all snapshot data."""
 
     st.caption(
-        "Performance uses the latest snapshot to show actuals for each arrival date. "
+        "Performance uses the best available snapshot per arrival date — "
+        "past years show full-year closed actuals; current year shows latest on-books. "
         "Aggregations use correct RM formulas (ADR = Σrev/Σrooms, Occ = Σsold/Σavail)."
     )
 
-    # Use latest snapshot for performance
+    # best_view: for each (hotel, date) keeps the latest snapshot row
+    # → 2024/2025 show full-year actuals, current year shows latest on-books
     snaps = kpi_engine.get_snapshots(df)
-    current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    current = kpi_engine.best_view(df) if snaps else df.copy()
     current["date"] = pd.to_datetime(current["date"], errors="coerce")
 
     _kpi_row(current)
@@ -791,9 +793,9 @@ def tab_forecast(df: pd.DataFrame, method: str, horizon: int) -> None:
 
     metric = st.selectbox("Metric", metrics, key="fc_metric")
 
-    # Use the latest snapshot for forecasting
+    # best_view gives the most accurate historical series for forecasting
     snaps = kpi_engine.get_snapshots(df)
-    source = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    source = kpi_engine.best_view(df) if snaps else df.copy()
     source["date"] = pd.to_datetime(source["date"], errors="coerce")
 
     # Daily series for the chosen metric (correct RM formula)
@@ -864,7 +866,7 @@ def tab_forecast(df: pd.DataFrame, method: str, horizon: int) -> None:
 def tab_anomalies(df: pd.DataFrame) -> None:
     st.subheader("Anomaly Detection")
 
-    source = kpi_engine.latest_snapshot_view(df) if kpi_engine.get_snapshots(df) else df.copy()
+    source = kpi_engine.best_view(df) if kpi_engine.get_snapshots(df) else df.copy()
     daily = kpi_engine.rm_aggregate(source, ["date"]).sort_values("date") if not source.empty else pd.DataFrame()
 
     if daily.empty:
