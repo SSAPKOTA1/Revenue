@@ -31,6 +31,7 @@ from modules import (
     kpi_engine, exports,
     hotel_dashboard, portfolio_dashboard,
 )
+from modules import cache_manager
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -118,6 +119,24 @@ def render_sidebar(df: pd.DataFrame) -> dict:
             ),
         )
         load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True, type="primary")
+        force_refresh = st.button("⚡ Force Re-scan (bypass cache)", use_container_width=True)
+
+        # ── Cache info ────────────────────────────────────────────────────
+        cache_info = cache_manager.get_cache_info()
+        if cache_info:
+            st.markdown(
+                f"<div style='background:#1e2a3a;border-radius:6px;padding:8px 12px;font-size:0.78rem;color:#94A3B8;'>"
+                f"💾 <b>Cache</b>: {cache_info.get('saved_at_display','?')} · "
+                f"{cache_info.get('rows',0):,} rows · "
+                f"{cache_info.get('hotels',0)} hotels · "
+                f"{cache_info.get('cache_size_mb',0)} MB"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button("🗑️ Clear Cache", use_container_width=True):
+                cache_manager.clear_cache()
+                st.sidebar.success("Cache cleared.")
+                st.rerun()
 
         st.markdown("---")
 
@@ -171,6 +190,7 @@ def render_sidebar(df: pd.DataFrame) -> dict:
     return {
         "folder": folder_input,
         "load": load_btn,
+        "force_refresh": force_refresh,
         "mode": mode,
         "hotel": selected_hotel,
         "date_min": date_min,
@@ -392,20 +412,35 @@ def main() -> None:
     if not st.session_state["auto_load_done"] and df.empty:
         auto_folder = (DEFAULT_DATA_FOLDER or "").strip()
         if auto_folder and Path(auto_folder).exists():
-            with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
-                try:
-                    new_df, new_reports = load_data(auto_folder)
-                    if not new_df.empty:
-                        new_df = data_cleaner.clean(new_df)
-                        st.session_state["df"] = new_df
-                        st.session_state["file_reports"] = new_reports
+            # Try loading from cache first
+            is_valid, reason = cache_manager.cache_is_valid(auto_folder)
+            if is_valid:
+                with st.spinner("Loading from cache…"):
+                    cached_df, cached_meta = cache_manager.load_cache()
+                    if cached_df is not None:
+                        st.session_state["df"] = cached_df
+                        st.session_state["file_reports"] = []
                         st.session_state["last_folder"] = auto_folder
                         st.session_state["demo_loaded"] = True
-                        df = new_df
-                        file_reports = new_reports
-                        logger.info("Auto-loaded %d rows from default folder", len(new_df))
-                except Exception as e:
-                    logger.error("Auto-load failed: %s", e)
+                        df = cached_df
+                        logger.info("Auto-loaded %d rows from cache", len(cached_df))
+            else:
+                logger.info("Cache invalid (%s) — scanning files", reason)
+                with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
+                    try:
+                        new_df, new_reports = load_data(auto_folder)
+                        if not new_df.empty:
+                            new_df = data_cleaner.clean(new_df)
+                            cache_manager.save_cache(new_df, auto_folder, new_reports)
+                            st.session_state["df"] = new_df
+                            st.session_state["file_reports"] = new_reports
+                            st.session_state["last_folder"] = auto_folder
+                            st.session_state["demo_loaded"] = True
+                            df = new_df
+                            file_reports = new_reports
+                            logger.info("Auto-loaded %d rows from folder", len(new_df))
+                    except Exception as e:
+                        logger.error("Auto-load failed: %s", e)
         st.session_state["auto_load_done"] = True
 
     # ── Load demo data only if no real data and no default folder ─────────
@@ -423,7 +458,8 @@ def main() -> None:
         )
 
     # ── User-triggered data load ───────────────────────────────────────────
-    if sel["load"]:
+    trigger_load = sel["load"] or sel.get("force_refresh")
+    if trigger_load:
         folder = sel["folder"].strip()
         if not folder:
             st.sidebar.warning("Please enter a folder path first.")
@@ -434,24 +470,43 @@ def main() -> None:
             )
         else:
             st.session_state["last_folder"] = folder
-            prog = st.progress(0, text="Scanning folder structure…")
-            try:
-                new_df, new_reports = load_data(folder)
-                prog.progress(1.0, text="Processing complete.")
-                if new_df.empty:
-                    st.sidebar.warning("No readable hotel files found. Check the folder path and file formats (.xlsx/.xls/.csv).")
-                else:
-                    st.session_state["df"] = new_df
-                    st.session_state["file_reports"] = new_reports
-                    st.session_state["demo_loaded"] = True  # suppress demo
-                    df = new_df
-                    file_reports = new_reports
-                    st.sidebar.success(f"✅ Loaded {len(new_df):,} rows from {len(new_reports)} files.")
-            except Exception as e:
-                logger.error("Load failed: %s\n%s", e, traceback.format_exc())
-                st.sidebar.error(f"Load error: {e}")
-            finally:
-                prog.empty()
+            force = sel.get("force_refresh", False)
+
+            # Use cache if valid and not force-refreshing
+            if not force:
+                is_valid, reason = cache_manager.cache_is_valid(folder)
+            else:
+                is_valid, reason = False, "Force refresh requested"
+
+            if is_valid:
+                with st.spinner("Loading from cache…"):
+                    cached_df, cached_meta = cache_manager.load_cache()
+                    if cached_df is not None:
+                        st.session_state["df"] = cached_df
+                        st.session_state["file_reports"] = []
+                        st.session_state["demo_loaded"] = True
+                        df = cached_df
+                        st.sidebar.success(f"✅ Loaded {len(cached_df):,} rows from cache.")
+            else:
+                prog = st.progress(0, text="Scanning folder structure…")
+                try:
+                    new_df, new_reports = load_data(folder)
+                    prog.progress(1.0, text="Processing complete.")
+                    if new_df.empty:
+                        st.sidebar.warning("No readable hotel files found. Check the folder path and file formats (.xlsx/.xls/.csv).")
+                    else:
+                        cache_manager.save_cache(new_df, folder, new_reports)
+                        st.session_state["df"] = new_df
+                        st.session_state["file_reports"] = new_reports
+                        st.session_state["demo_loaded"] = True
+                        df = new_df
+                        file_reports = new_reports
+                        st.sidebar.success(f"✅ Loaded {len(new_df):,} rows from {len(new_reports)} files. Cache saved.")
+                except Exception as e:
+                    logger.error("Load failed: %s\n%s", e, traceback.format_exc())
+                    st.sidebar.error(f"Load error: {e}")
+                finally:
+                    prog.empty()
 
     df = st.session_state["df"]
     file_reports = st.session_state["file_reports"]

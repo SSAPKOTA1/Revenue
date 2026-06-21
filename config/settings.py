@@ -7,11 +7,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 LOG_DIR = BASE_DIR / "logs"
 OUTPUT_DIR = BASE_DIR / "outputs"
 ASSETS_DIR = BASE_DIR / "assets"
+CACHE_DIR = BASE_DIR / "cache"
 
 LOG_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+CACHE_DIR.mkdir(exist_ok=True)
 
 LOG_FILE = LOG_DIR / "app.log"
+CACHE_FILE = CACHE_DIR / "master_data.parquet"
+CACHE_META_FILE = CACHE_DIR / "cache_meta.json"
 
 # ── App Meta ───────────────────────────────────────────────────────────────
 APP_TITLE = "Hotel Revenue Management Analytics Platform"
