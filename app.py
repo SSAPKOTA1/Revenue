@@ -99,12 +99,27 @@ def render_sidebar(df: pd.DataFrame) -> dict:
 
         # ── Folder selection ───────────────────────────────────────────────
         st.markdown("### 📁 Data Source")
+        st.caption(
+            "Enter the **main/root folder** path. "
+            "The app will automatically scan all subfolders "
+            "(year → month → day → hotel files)."
+        )
         folder_input = st.text_input(
             "Root Data Folder",
-            value=str(ROOT / "data"),
-            help="Absolute path to the folder containing hotel Excel files.",
+            value=st.session_state.get("last_folder", ""),
+            placeholder="/path/to/your/data/root",
+            help=(
+                "Absolute path to the top-level folder. "
+                "Expected layout:\n"
+                "  root/\n"
+                "    2024/\n"
+                "      January/\n"
+                "        01/\n"
+                "          HotelName.xlsx\n"
+                "Any nesting depth is supported."
+            ),
         )
-        load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True)
+        load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True, type="primary")
 
         st.markdown("---")
 
@@ -204,7 +219,7 @@ def render_data_quality(df: pd.DataFrame, file_reports: list[dict]) -> None:
         if file_reports:
             st.subheader("Ingestion Report")
             rep_df = pd.DataFrame(file_reports)
-            cols_to_show = [c for c in ["file", "status", "rows", "error"] if c in rep_df.columns]
+            cols_to_show = [c for c in ["file", "path", "hotel", "status", "rows", "error"] if c in rep_df.columns]
             st.dataframe(rep_df[cols_to_show], use_container_width=True, hide_index=True)
 
         # Export validation
@@ -373,8 +388,8 @@ def main() -> None:
     # ── Sidebar controls ───────────────────────────────────────────────────
     sel = render_sidebar(df)
 
-    # ── Load demo data on first run ────────────────────────────────────────
-    if not st.session_state["demo_loaded"] and df.empty:
+    # ── Load demo data on first run (only when no folder provided) ────────────
+    if not st.session_state["demo_loaded"] and df.empty and not sel["folder"].strip():
         with st.spinner("Loading demo data (14 hotels, 365 days each)…"):
             demo_df = _generate_demo_data()
             demo_df = data_cleaner.clean(demo_df)
@@ -384,23 +399,31 @@ def main() -> None:
             df = demo_df
         st.info(
             "📌 **Demo Mode** — Showing synthetic data for 14 hotels. "
-            "Enter a real data folder path and click 'Load / Refresh Data' to use your own files."
+            "Enter your root data folder path in the sidebar and click **Load / Refresh Data** to use your own files."
         )
 
     # ── User-triggered data load ───────────────────────────────────────────
     if sel["load"]:
         folder = sel["folder"].strip()
-        if not Path(folder).exists():
-            st.sidebar.error(f"Folder not found:\n{folder}")
+        if not folder:
+            st.sidebar.warning("Please enter a folder path first.")
+        elif not Path(folder).exists():
+            st.sidebar.error(
+                f"Folder not found:\n`{folder}`\n\n"
+                "Please enter an absolute path to your data root folder."
+            )
         else:
-            prog = st.progress(0, text="Loading files…")
+            st.session_state["last_folder"] = folder
+            prog = st.progress(0, text="Scanning folder structure…")
             try:
                 new_df, new_reports = load_data(folder)
+                prog.progress(1.0, text="Processing complete.")
                 if new_df.empty:
-                    st.sidebar.warning("No readable data files found in that folder.")
+                    st.sidebar.warning("No readable hotel files found. Check the folder path and file formats (.xlsx/.xls/.csv).")
                 else:
                     st.session_state["df"] = new_df
                     st.session_state["file_reports"] = new_reports
+                    st.session_state["demo_loaded"] = True  # suppress demo
                     df = new_df
                     file_reports = new_reports
                     st.sidebar.success(f"✅ Loaded {len(new_df):,} rows from {len(new_reports)} files.")
