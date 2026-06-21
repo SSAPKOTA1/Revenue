@@ -56,18 +56,29 @@ _UUID_PREFIX = re.compile(r'^[0-9a-f]{6,32}[-_]', re.I)
 
 def _hotel_name_from_path(filepath: Path) -> str:
     """
-    Derive a clean hotel name from the file path stem.
-    Strips leading UUID/hash prefix, then normalises separators.
+    Derive hotel name purely from the filename stem.
+
+    Rules (applied in order):
+    1. Strip any leading hex hash prefix:  "6b81a1f2-HotelName" → "HotelName"
+       Supports formats: "abc123-Name", "abc123_Name"
+    2. Replace underscores and hyphens with spaces.
+    3. Collapse multiple spaces and strip.
+
+    Examples:
+        "6b81a1f2-Aschaffenburg.xlsx"  → "Aschaffenburg"
+        "db676e20-Giessen.xlsx"        → "Giessen"
+        "Grand_Hotel_Frankfurt.xlsx"   → "Grand Hotel Frankfurt"
+        "Marriott-Airport.xlsx"        → "Marriott Airport"
+        "HotelName.xlsx"               → "HotelName"
     """
     stem = filepath.stem
-    stem = _UUID_PREFIX.sub('', stem)            # remove hash prefix
-    # Replace underscores/dashes ONLY between word chars (not inside words)
-    stem = re.sub(r'(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])', ' ', stem)
-    stem = re.sub(r'(?<=[A-Za-z0-9])-(?=[A-Za-z0-9])', ' ', stem)
-    # Collapse any remaining underscores/dashes and extra whitespace
-    stem = re.sub(r'[_\-]+', '', stem)
+    # Strip leading hex prefix (6–32 hex chars followed by - or _)
+    stem = re.sub(r'^[0-9a-fA-F]{6,32}[-_]', '', stem)
+    # Replace underscores and hyphens with spaces
+    stem = stem.replace('_', ' ').replace('-', ' ')
+    # Collapse whitespace
     stem = re.sub(r'\s+', ' ', stem).strip()
-    return stem or filepath.stem
+    return stem if stem else filepath.stem
 
 
 # ── Format detection ───────────────────────────────────────────────────────
