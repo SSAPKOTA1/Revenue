@@ -14,8 +14,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 CACHE_DIR.mkdir(exist_ok=True)
 
 LOG_FILE = LOG_DIR / "app.log"
-CACHE_FILE = CACHE_DIR / "master_data.parquet"
+CACHE_FILE = CACHE_DIR / "master_data.parquet"   # kept for migration
 CACHE_META_FILE = CACHE_DIR / "cache_meta.json"
+SQLITE_FILE = CACHE_DIR / "master_data.db"
 
 # ── App Meta ───────────────────────────────────────────────────────────────
 APP_TITLE = "Hotel Revenue Management Analytics Platform"

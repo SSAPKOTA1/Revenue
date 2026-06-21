@@ -81,17 +81,26 @@ def _do_scan(folder: str) -> tuple[pd.DataFrame, list[dict]]:
     return cleaned, file_reports
 
 
+@st.cache_data(show_spinner=False, ttl=3600)
+def _load_from_sqlite() -> pd.DataFrame:
+    """Load full dataset from SQLite — cached by Streamlit for 1 hour."""
+    df, _ = cache_manager.load_cache()
+    return df if df is not None else pd.DataFrame()
+
+
 def _load_from_cache_or_scan(folder: str, force: bool = False) -> tuple[pd.DataFrame, list[dict], str]:
     """Returns (df, file_reports, source) where source is 'cache' or 'scan'."""
     if not force:
-        is_valid, reason = cache_manager.cache_is_valid(folder)
+        is_valid, _ = cache_manager.cache_is_valid(folder)
         if is_valid:
-            cached_df, _ = cache_manager.load_cache()
-            if cached_df is not None:
-                return cached_df, [], "cache"
+            # Use Streamlit-cached loader so repeated interactions are instant
+            df = _load_from_sqlite()
+            if not df.empty:
+                return df, [], "cache"
     df, reports = _do_scan(folder)
     if not df.empty:
         cache_manager.save_cache(df, folder, reports)
+        _load_from_sqlite.clear()   # invalidate Streamlit cache after new scan
     return df, reports, "scan"
 
 

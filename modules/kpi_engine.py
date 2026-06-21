@@ -14,6 +14,7 @@ from typing import Optional
 
 import pandas as pd
 import numpy as np
+import streamlit as st
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 _BASE_COLS = ["rooms_sold", "rooms_available", "revenue", "room_revenue", "fnb_revenue"]
 
 
+@st.cache_data(show_spinner=False, max_entries=128)
 def rm_aggregate(
     df: pd.DataFrame,
     group_cols: list[str],
@@ -131,6 +133,7 @@ def get_snapshots(df: pd.DataFrame) -> list[pd.Timestamp]:
     return sorted([pd.Timestamp(s) for s in raw])
 
 
+@st.cache_data(show_spinner=False, max_entries=16)
 def latest_snapshot_view(df: pd.DataFrame) -> pd.DataFrame:
     """Return rows from the most recent snapshot only."""
     snaps = get_snapshots(df)
@@ -175,6 +178,7 @@ def monthly_performance(df: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values("month")
 
 
+@st.cache_data(show_spinner=False, max_entries=32)
 def aggregate_period(df: pd.DataFrame, group_by: str = "Monthly") -> pd.DataFrame:
     df = add_period_col(df, "date", group_by)
     out = rm_aggregate(df, ["period", "period_label"])
