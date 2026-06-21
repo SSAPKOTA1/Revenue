@@ -1,4 +1,12 @@
-"""Hotel-level dashboard: renders all tabs for a single selected hotel."""
+"""
+Hotel-level dashboard — 6 tabs:
+  1. Current Position  — what's on books now for future arrival dates
+  2. Pickup            — change between latest snapshot and a past snapshot
+  3. Pace              — how did bookings for a selected arrival date build up
+  4. Performance       — historical actuals (past arrival dates)
+  5. Forecast          — demand forecast
+  6. Anomalies         — outlier detection
+"""
 
 import logging
 from typing import Optional
@@ -6,866 +14,861 @@ from typing import Optional
 import pandas as pd
 import numpy as np
 import streamlit as st
+import plotly.graph_objects as go
+import plotly.express as px
 
-from modules import kpi_engine, pickup_pace, forecasting, anomaly_detection, visualizations
-from config.settings import BRAND_COLORS, COMPRESSION_THRESHOLD, KPI_FORMAT
+from modules import kpi_engine, forecasting, anomaly_detection, exports
+from config.settings import BRAND_COLORS, COMPRESSION_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
+_DARK = dict(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color="#E0E0E0", size=12),
+    margin=dict(l=40, r=20, t=50, b=40),
+)
 
-# ── Revenue Management aggregation helper ────────────────────────────────────
 
-def _rm_agg(df: pd.DataFrame, group_col: str, metric: str) -> pd.DataFrame:
-    """
-    Aggregate raw room/revenue data using correct RM formulas.
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-    ADR       = Σ Revenue / Σ Rooms Sold          (never average ADR directly)
-    Occupancy = Σ Rooms Sold / Σ Rooms Available  (never average occ% directly)
-    RevPAR    = Σ Revenue / Σ Rooms Available
-    Revenue   = Σ Revenue
-    Rooms Sold= Σ Rooms Sold
-
-    Returns a DataFrame with columns [group_col, metric] where metric
-    is calculated with the correct formula.
-    """
-    if df.empty or group_col not in df.columns:
-        return pd.DataFrame()
-
-    # Always sum the additive base columns
-    sum_cols = [c for c in ["rooms_sold", "rooms_available", "revenue"] if c in df.columns]
-    if not sum_cols:
-        return pd.DataFrame()
-
-    base = df.groupby(group_col)[sum_cols].sum(min_count=1).reset_index()
-
-    # Derive requested metric from the summed bases
+def _fmt(val: float, metric: str) -> str:
+    if pd.isna(val):
+        return "N/A"
     if metric == "occupancy_pct":
-        if "rooms_sold" in base.columns and "rooms_available" in base.columns:
-            base[metric] = (
-                base["rooms_sold"] / base["rooms_available"].replace(0, np.nan) * 100
-            ).clip(0, 100)
-        elif "occupancy_pct" in df.columns:
-            # Fall back: weighted mean using rooms_available as weight
-            wm = (
-                df.groupby(group_col)
-                .apply(lambda g: np.average(
-                    g["occupancy_pct"].fillna(0),
-                    weights=g.get("rooms_available", pd.Series(np.ones(len(g)))).fillna(1)
-                ))
-                .reset_index(name=metric)
-            )
-            base = base.merge(wm, on=group_col, how="left")
-
-    elif metric == "adr":
-        if "revenue" in base.columns and "rooms_sold" in base.columns:
-            base[metric] = base["revenue"] / base["rooms_sold"].replace(0, np.nan)
-        elif "adr" in df.columns:
-            # Weighted mean using rooms_sold as weight
-            wm = (
-                df.groupby(group_col)
-                .apply(lambda g: np.average(
-                    g["adr"].fillna(0),
-                    weights=g.get("rooms_sold", pd.Series(np.ones(len(g)))).fillna(1)
-                ))
-                .reset_index(name=metric)
-            )
-            base = base.merge(wm, on=group_col, how="left")
-
-    elif metric == "revpar":
-        if "revenue" in base.columns and "rooms_available" in base.columns:
-            base[metric] = base["revenue"] / base["rooms_available"].replace(0, np.nan)
-        elif "revpar" in df.columns:
-            wm = (
-                df.groupby(group_col)
-                .apply(lambda g: np.average(
-                    g["revpar"].fillna(0),
-                    weights=g.get("rooms_available", pd.Series(np.ones(len(g)))).fillna(1)
-                ))
-                .reset_index(name=metric)
-            )
-            base = base.merge(wm, on=group_col, how="left")
-
-    elif metric == "revenue":
-        pass  # already summed above
-
-    elif metric == "rooms_sold":
-        pass  # already summed above
-
-    else:
-        # Generic numeric: sum if additive, mean otherwise
-        if metric in df.columns:
-            base[metric] = df.groupby(group_col)[metric].sum(min_count=1).values
-
-    return base[[group_col, metric]].copy()
+        return f"{val:.1f}%"
+    if metric in ("adr", "revpar", "revenue"):
+        return f"€{val:,.2f}" if val < 1_000_000 else f"€{val/1_000:,.0f}k"
+    return f"{val:,.1f}"
 
 
-# ── KPI Card helper ──────────────────────────────────────────────────────────
-
-def _kpi_card(label: str, value: float | str, fmt: str = "{:,.2f}", delta: Optional[float] = None) -> str:
-    if isinstance(value, float) and not np.isnan(value):
-        formatted = fmt.format(value)
-    elif isinstance(value, str):
-        formatted = value
-    else:
-        formatted = "N/A"
-
+def _kpi_card(label: str, value: str, delta: Optional[str] = None, delta_pos: bool = True) -> str:
     delta_html = ""
-    if delta is not None and not np.isnan(delta):
-        color = "#27AE60" if delta >= 0 else "#E74C3C"
-        arrow = "▲" if delta >= 0 else "▼"
-        delta_html = f"<span style='color:{color};font-size:13px'>{arrow} {abs(delta):,.1f}</span>"
-
+    if delta:
+        color = "#22c55e" if delta_pos else "#ef4444"
+        arrow = "▲" if delta_pos else "▼"
+        delta_html = f"<span style='color:{color};font-size:13px'>{arrow} {delta}</span>"
     return f"""
-    <div style='background:linear-gradient(135deg,#1A2744,#1E3A5F);
-                border-radius:12px;padding:20px 24px;
-                border:1px solid rgba(255,255,255,0.08);
+    <div style='background:linear-gradient(135deg,#1a2744,#1e3a5f);border-radius:10px;
+                padding:18px 22px;border:1px solid rgba(255,255,255,0.08);
                 box-shadow:0 4px 15px rgba(0,0,0,0.3);'>
-      <p style='margin:0;font-size:12px;color:#94A3B8;letter-spacing:1px;text-transform:uppercase'>{label}</p>
-      <p style='margin:6px 0 4px;font-size:28px;font-weight:700;color:#F1F5F9'>{formatted}</p>
+      <p style='margin:0;font-size:11px;color:#94a3b8;letter-spacing:1px;text-transform:uppercase'>{label}</p>
+      <p style='margin:6px 0 2px;font-size:26px;font-weight:700;color:#f1f5f9'>{value}</p>
       {delta_html}
     </div>"""
 
 
-def render_kpi_cards(kpis: dict, cols: int = 5) -> None:
-    """Render a row of KPI metric cards."""
-    card_defs = [
+def _kpi_row(kpis: dict) -> None:
+    cols = st.columns(5)
+    items = [
         ("Occupancy", "occupancy_pct", "{:.1f}%"),
-        ("ADR", "adr", "${:,.2f}"),
-        ("RevPAR", "revpar", "${:,.2f}"),
-        ("Revenue", "revenue", "${:,.0f}"),
-        ("Rooms Sold", "rooms_sold", "{:,.0f}"),
+        ("ADR",       "adr",           "€{:,.2f}"),
+        ("RevPAR",    "revpar",        "€{:,.2f}"),
+        ("Revenue",   "revenue",       "€{:,.0f}"),
+        ("Rooms Sold","rooms_sold",    "{:,.0f}"),
     ]
-    columns = st.columns(len(card_defs))
-    for col, (label, key, fmt) in zip(columns, card_defs):
-        val = kpis.get(key, float("nan"))
+    for col, (lbl, key, fmt) in zip(cols, items):
+        val = kpis.get(key, np.nan)
         with col:
-            st.markdown(_kpi_card(label, val, fmt), unsafe_allow_html=True)
+            disp = fmt.format(val) if not pd.isna(val) else "N/A"
+            st.markdown(_kpi_card(lbl, disp), unsafe_allow_html=True)
 
 
-# ── Tab: Overview ────────────────────────────────────────────────────────────
+def _bar(x, y_pos, y_neg=None, title="", x_title="", y_title="", labels_pos=None, labels_neg=None):
+    fig = go.Figure()
+    if y_neg is None:
+        colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"] for v in y_pos]
+        fig.add_trace(go.Bar(x=x, y=y_pos, marker_color=colors,
+                             text=[f"{v:+,.1f}" for v in y_pos], textposition="outside"))
+    else:
+        fig.add_trace(go.Bar(x=x, y=y_neg, name="Comparison",
+                             marker_color=BRAND_COLORS["neutral"], opacity=0.8))
+        fig.add_trace(go.Bar(x=x, y=y_pos, name="Latest",
+                             marker_color=BRAND_COLORS["secondary"], opacity=0.9))
+        fig.update_layout(barmode="group")
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title=y_title, **_DARK)
+    return fig
 
-def tab_overview(df: pd.DataFrame, hotel: str) -> None:
-    kpis = kpi_engine.compute_hotel_kpis(df)
-    render_kpi_cards(kpis)
 
+def _line(x, y, title="", x_title="", y_title="", color=None, fill=False, name=""):
+    fig = go.Figure()
+    c = color or BRAND_COLORS["secondary"]
+    kwargs = dict(x=x, y=y, mode="lines+markers",
+                  line=dict(color=c, width=2.5),
+                  marker=dict(size=6, color=BRAND_COLORS["accent"]),
+                  name=name or y_title,
+                  hovertemplate="%{x|%d %b %Y}<br>%{y:,.1f}<extra></extra>")
+    fig.add_trace(go.Scatter(**kwargs))
+    if fill:
+        fig.add_trace(go.Scatter(x=x, y=y, fill="tozeroy",
+                                 fillcolor="rgba(46,134,193,0.12)",
+                                 line=dict(width=0), showlegend=False, hoverinfo="skip"))
+    fig.update_layout(title=title, xaxis_title=x_title, yaxis_title=y_title,
+                      hovermode="x unified", **_DARK)
+    return fig
+
+
+# ── Snapshot helper ───────────────────────────────────────────────────────────
+
+def _snap_banner(df: pd.DataFrame):
+    snaps = kpi_engine.get_snapshots(df)
+    if len(snaps) >= 2:
+        st.success(
+            f"✅ **{len(snaps)} snapshots** — "
+            f"{pd.Timestamp(snaps[0]).strftime('%d %b %Y')} → "
+            f"{pd.Timestamp(snaps[-1]).strftime('%d %b %Y')}"
+        )
+    elif len(snaps) == 1:
+        st.warning("⚠️ Only 1 snapshot found. Pickup and Pace need ≥ 2 snapshots.")
+    else:
+        st.error("⚠️ No snapshot dates detected. Check folder structure: year/month/day/Hotel.xlsx")
+    return snaps
+
+
+# ── Tab 1: Current Position ───────────────────────────────────────────────────
+
+def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
+    """What's on books right now (latest snapshot) for future arrival dates."""
+
+    snaps = kpi_engine.get_snapshots(df)
+    latest_snap = snaps[-1] if snaps else None
+
+    # Current view = latest snapshot
+    if latest_snap:
+        current = kpi_engine.latest_snapshot_view(df)
+        st.caption(f"📅 Showing on-books as of **{latest_snap.strftime('%d %b %Y')}** (latest snapshot)")
+    else:
+        current = df.copy()
+        st.caption("📅 No snapshots — showing all data combined")
+
+    # KPIs for the full current view
+    kpis = kpi_engine.hotel_kpis(current)
+    _kpi_row(kpis)
     st.markdown("---")
-    daily = kpi_engine.aggregate_daily(df)
-    if daily.empty:
-        st.info("No daily data available.")
-        return
 
+    # Controls
     c1, c2 = st.columns(2)
     with c1:
-        if "occupancy_pct" in daily.columns:
-            fig = visualizations.area_chart(
-                daily, "date", "occupancy_pct",
-                title="Daily Occupancy %",
-                color=BRAND_COLORS["secondary"],
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        if "revpar" in daily.columns:
-            fig = visualizations.area_chart(
-                daily, "date", "revpar",
-                title="Daily RevPAR",
-                color=BRAND_COLORS["accent"],
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-    c3, c4 = st.columns(2)
-    with c3:
-        if "adr" in daily.columns:
-            fig = visualizations.line_chart(daily, "date", "adr", title="Daily ADR")
-            st.plotly_chart(fig, use_container_width=True)
-    with c4:
-        if "revenue" in daily.columns:
-            fig = visualizations.area_chart(
-                daily, "date", "revenue", title="Daily Revenue",
-                color=BRAND_COLORS["success"],
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-
-# ── Tab: Performance ────────────────────────────────────────────────────────
-
-def tab_performance(df: pd.DataFrame) -> None:
-    st.subheader("Monthly Performance")
-    monthly = kpi_engine.aggregate_period(df, "M", group_hotel=False)
-    if not monthly.empty and "period" in monthly.columns:
-        c1, c2 = st.columns(2)
-        with c1:
-            if "occupancy_pct" in monthly.columns:
-                fig = visualizations.bar_chart(monthly, "period", "occupancy_pct",
-                                               title="Monthly Occupancy %",
-                                               color=BRAND_COLORS["secondary"])
-                st.plotly_chart(fig, use_container_width=True)
-        with c2:
-            if "revenue" in monthly.columns:
-                fig = visualizations.bar_chart(monthly, "period", "revenue",
-                                               title="Monthly Revenue",
-                                               color=BRAND_COLORS["success"])
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Weekday Performance")
-    weekday = kpi_engine.weekday_performance(df)
-    if not weekday.empty:
-        c3, c4 = st.columns(2)
-        with c3:
-            if "occupancy_pct" in weekday.columns:
-                fig = visualizations.bar_chart(weekday, "day_name", "occupancy_pct",
-                                               title="Occupancy by Day of Week",
-                                               color=BRAND_COLORS["primary"])
-                st.plotly_chart(fig, use_container_width=True)
-        with c4:
-            if "adr" in weekday.columns:
-                fig = visualizations.bar_chart(weekday, "day_name", "adr",
-                                               title="ADR by Day of Week",
-                                               color=BRAND_COLORS["accent"])
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Seasonality — Monthly Average")
-    seasonal = kpi_engine.monthly_performance(df)
-    if not seasonal.empty:
-        c5, c6 = st.columns(2)
-        with c5:
-            if "revpar" in seasonal.columns:
-                fig = visualizations.bar_chart(seasonal, "month_name", "revpar",
-                                               title="RevPAR by Month",
-                                               color=BRAND_COLORS["secondary"])
-                st.plotly_chart(fig, use_container_width=True)
-        with c6:
-            if "adr" in seasonal.columns:
-                fig = visualizations.line_chart(seasonal, "month_name", "adr",
-                                                title="ADR Seasonality")
-                st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Heatmaps")
-    if "day_name" in df.columns and "month_name" in df.columns:
-        c7, c8 = st.columns(2)
-        with c7:
-            fig = visualizations.occupancy_heatmap(df, title="Occupancy % Heatmap")
-            st.plotly_chart(fig, use_container_width=True)
-        with c8:
-            if "revpar" in df.columns:
-                fig = visualizations.occupancy_heatmap(df, z_col="revpar",
-                                                        title="RevPAR Heatmap")
-                st.plotly_chart(fig, use_container_width=True)
-
-    # Compression nights
-    compression = kpi_engine.compression_nights(df, COMPRESSION_THRESHOLD)
-    st.subheader(f"Compression Nights (Occ ≥ {COMPRESSION_THRESHOLD}%)")
-    if not compression.empty:
-        st.metric("Compression Nights", len(compression))
-        display_cols = [c for c in ["date", "occupancy_pct", "adr", "revpar", "revenue"] if c in compression.columns]
-        st.dataframe(compression[display_cols].sort_values("date"), use_container_width=True, hide_index=True)
-    else:
-        st.info("No compression nights found in the selected date range.")
-
-    # Rolling averages
-    st.subheader("7-Day Rolling Average")
-    daily = kpi_engine.aggregate_daily(df)
-    if not daily.empty:
-        daily = kpi_engine.rolling_kpis(daily, 7)
-        for col in ["occupancy_pct_rolling7", "revpar_rolling7"]:
-            if col in daily.columns:
-                fig = visualizations.line_chart(daily, "date", col,
-                                                title=col.replace("_", " ").title())
-                st.plotly_chart(fig, use_container_width=True)
-
-
-# ── Snapshot diagnostics ─────────────────────────────────────────────────────
-
-def _snapshot_status(df: pd.DataFrame) -> tuple[bool, list]:
-    """
-    Returns (has_snapshots, sorted_snapshot_list).
-    A DataFrame has meaningful snapshots only if there are ≥ 2 distinct dates.
-    """
-    if "snapshot_date" not in df.columns:
-        return False, []
-    snaps = sorted(pd.to_datetime(df["snapshot_date"], errors="coerce").dropna().unique())
-    return len(snaps) >= 2, snaps
-
-
-def _render_snapshot_info(df: pd.DataFrame) -> tuple[bool, list]:
-    """Show a compact snapshot status badge and return (has_snapshots, snaps)."""
-    has_snaps, snaps = _snapshot_status(df)
-
-    if has_snaps:
-        first = pd.Timestamp(snaps[0]).strftime("%d %b %Y")
-        last  = pd.Timestamp(snaps[-1]).strftime("%d %b %Y")
-        st.success(
-            f"✅ **{len(snaps)} snapshots detected** — from {first} to {last}. "
-            f"Each snapshot = one day-folder export of the 365-day occupancy picture."
+        group_by = st.selectbox(
+            "Group arrival dates by",
+            ["Monthly", "Weekly", "Quarterly", "Yearly", "Daily"],
+            key="cp_groupby",
         )
-    else:
-        n = len(snaps)
-        if n == 0:
-            st.error(
-                "⚠️ **No snapshot dates found.**  \n"
-                "The app reads the snapshot date from your folder structure "
-                "(`year / month / day / hotel.xlsx`).  \n"
-                "Check the **Data Quality** panel → Ingestion Report to see what "
-                "snapshot_date was detected for each file.  \n"
-                "If the folder names don't contain a recognisable date the app "
-                "falls back to the file's last-modified date."
-            )
-        else:
-            st.warning(
-                f"⚠️ **Only 1 snapshot detected** ({pd.Timestamp(snaps[0]).strftime('%d %b %Y')}).  \n"
-                "Pickup and Pace need ≥ 2 snapshots to show change over time.  \n"
-                "Make sure you have data from at least two different day-folders."
-            )
-    return has_snaps, snaps
+    with c2:
+        available = [m for m in ["rooms_sold", "revenue", "occupancy_pct", "adr", "revpar"]
+                     if m in current.columns]
+        metric = st.selectbox("Metric", available, key="cp_metric")
+
+    if current.empty:
+        st.info("No data in the current snapshot.")
+        return
+
+    # Add period and aggregate
+    agg = kpi_engine.rm_aggregate(
+        kpi_engine.add_period_col(current, "date", group_by),
+        ["period", "period_label"],
+    ).sort_values("period")
+
+    if agg.empty or metric not in agg.columns:
+        st.info("Not enough data to aggregate.")
+        return
+
+    metric_label = metric.replace("_", " ").title()
+
+    # Chart: current on-books by arrival period
+    fig = go.Figure(go.Bar(
+        x=agg["period_label"],
+        y=agg[metric],
+        marker_color=BRAND_COLORS["secondary"],
+        text=[_fmt(v, metric) for v in agg[metric]],
+        textposition="outside",
+        name=metric_label,
+    ))
+    fig.update_layout(
+        title=f"On-Books {metric_label} by Arrival {group_by} — as of {latest_snap.strftime('%d %b %Y') if latest_snap else 'Latest'}",
+        xaxis_title=f"Arrival Date ({group_by})",
+        yaxis_title=metric_label,
+        **_DARK,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Table summary
+    with st.expander("📋 Detailed breakdown"):
+        display_cols = ["period_label"] + [c for c in
+                        ["rooms_sold", "rooms_available", "occupancy_pct", "adr", "revpar", "revenue"]
+                        if c in agg.columns]
+        show = agg[display_cols].copy()
+        show.columns = [c.replace("_", " ").title() for c in show.columns]
+        st.dataframe(show.round(2), use_container_width=True, hide_index=True)
+
+    # Snapshot count info
+    if len(snaps) > 0:
+        st.markdown("---")
+        st.markdown(f"**Available Snapshots:** {len(snaps)} total")
+        snap_df = pd.DataFrame({
+            "Snapshot Date": [pd.Timestamp(s).strftime("%d %b %Y") for s in snaps],
+        })
+        with st.expander("View all snapshot dates"):
+            st.dataframe(snap_df, use_container_width=True, hide_index=True)
 
 
-# ── Tab: Pickup ──────────────────────────────────────────────────────────────
+# ── Tab 2: Pickup ─────────────────────────────────────────────────────────────
 
 def tab_pickup(df: pd.DataFrame) -> None:
     """
-    Pickup = latest snapshot on-books  MINUS  a chosen past snapshot on-books,
-    for each arrival date. Grouped by Day / Week / Month / Year.
+    Pickup = (on-books in latest snapshot) - (on-books in comparison snapshot)
+    for the same arrival dates.
     """
-    import plotly.graph_objects as go
-
-    st.subheader("Pickup Analysis")
     st.caption(
-        "Pickup measures how many rooms/revenue/ADR were added (or lost) "
-        "between the current booking position and a past snapshot."
+        "Pickup shows how many rooms/revenue were gained or lost between "
+        "the latest snapshot and a chosen past snapshot, for the same future arrival dates."
     )
 
-    has_snapshots, all_snaps_raw = _render_snapshot_info(df)
-
-    available_metrics = [m for m in ["rooms_sold", "revenue", "adr", "occupancy_pct"] if m in df.columns]
-    if not available_metrics:
-        st.info("No pickup metrics found in data.")
+    snaps = _snap_banner(df)
+    if len(snaps) < 2:
         return
 
-    # ── Controls row ────────────────────────────────────────────────────────
-    c1, c2, c3 = st.columns([2, 2, 2])
+    # ── Controls ─────────────────────────────────────────────────────────────
+    available_metrics = [m for m in ["rooms_sold", "revenue", "occupancy_pct", "adr"]
+                         if m in df.columns]
+    c1, c2, c3 = st.columns(3)
     with c1:
         metric = st.selectbox("Metric", available_metrics, key="pu_metric")
     with c2:
         group_by = st.selectbox(
-            "Group Arrival Dates By",
-            ["Daily", "Weekly", "Monthly", "Yearly"],
+            "Group arrival dates by",
+            ["Monthly", "Weekly", "Daily", "Yearly"],
             key="pu_groupby",
         )
     with c3:
-        pass  # comparison selector placed below
+        preset_map = {
+            "1 week ago (7 days)": 7,
+            "2 weeks ago (14 days)": 14,
+            "1 month ago (30 days)": 30,
+            "2 months ago (60 days)": 60,
+            "3 months ago (90 days)": 90,
+            "1 day ago": 1,
+            "3 days ago": 3,
+            "Custom date": -1,
+        }
+        preset = st.selectbox("Compare latest vs.", list(preset_map.keys()), key="pu_preset")
 
-    if not has_snapshots:
-        st.info(
-            "No snapshot dates found in this data. "
-            "Pickup requires files organised in day-folders so each folder date "
-            "becomes a booking snapshot. Showing day-over-day totals instead."
+    latest_snap = snaps[-1]
+
+    if preset_map[preset] == -1:
+        custom = st.date_input(
+            "Comparison snapshot date",
+            value=pd.Timestamp(snaps[0]).date(),
+            min_value=pd.Timestamp(snaps[0]).date(),
+            max_value=pd.Timestamp(snaps[-2]).date(),
+            key="pu_custom",
         )
-        daily = df.groupby("date")[metric].sum(min_count=1).reset_index().sort_values("date")
-        daily["pickup"] = daily[metric].diff()
-        fig = go.Figure()
-        fig.add_trace(go.Bar(x=daily["date"], y=daily["pickup"],
-                             marker_color=BRAND_COLORS["secondary"], name="Day-over-Day"))
-        fig.update_layout(title=f"Day-over-Day {metric}", template="plotly_dark",
-                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
-        return
+        target = pd.Timestamp(custom)
+    else:
+        target = latest_snap - pd.Timedelta(days=preset_map[preset])
 
-    # ── Snapshot selector ───────────────────────────────────────────────────
+    # Find closest available snapshot to target
+    diffs = [abs((s - target).days) for s in snaps[:-1]]
+    comp_snap = snaps[diffs.index(min(diffs))]
+
+    delta_days = (latest_snap - comp_snap).days
+    st.markdown(
+        f"**Latest:** `{latest_snap.strftime('%d %b %Y')}` &nbsp;vs&nbsp; "
+        f"**Comparison:** `{comp_snap.strftime('%d %b %Y')}` &nbsp;·&nbsp; "
+        f"Δ **{delta_days} days**"
+    )
+
+    # Extract the two views and add period
     df2 = df.copy()
     df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
     df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
-    df2 = df2.dropna(subset=["snapshot_date", "date"])
 
-    all_snaps = [pd.Timestamp(s) for s in all_snaps_raw]
-    latest_snap = all_snaps[-1]
-
-    # Preset options mapped to number of days back
-    preset_options = {
-        "1 day ago": 1,
-        "3 days ago": 3,
-        "7 days ago (1 week)": 7,
-        "14 days ago (2 weeks)": 14,
-        "30 days ago (1 month)": 30,
-        "60 days ago": 60,
-        "Custom date": -1,
-    }
-    with c3:
-        preset = st.selectbox("Compare latest vs.", list(preset_options.keys()), key="pu_preset")
-
-    if preset_options[preset] == -1:
-        compare_date = st.date_input(
-            "Pick comparison snapshot date",
-            value=pd.Timestamp(all_snaps[0]).date(),
-            min_value=pd.Timestamp(all_snaps[0]).date(),
-            max_value=pd.Timestamp(all_snaps[-2]).date(),
-            key="pu_custom_date",
-        )
-        target_snap_ts = pd.Timestamp(compare_date)
-    else:
-        target_snap_ts = latest_snap - pd.Timedelta(days=preset_options[preset])
-
-    # Find closest available snapshot to the target
-    snap_index = pd.DatetimeIndex(all_snaps)
-    diffs = abs(snap_index - target_snap_ts)
-    comparison_snap = pd.Timestamp(all_snaps[diffs.argmin()])
-
-    st.markdown(
-        f"**Latest snapshot:** `{latest_snap.strftime('%d %b %Y')}`   →   "
-        f"**Comparison snapshot:** `{comparison_snap.strftime('%d %b %Y')}`   "
-        f"*(Δ {(latest_snap - comparison_snap).days} days)*"
-    )
-
-    # ── Extract the two views ───────────────────────────────────────────────
-    latest_view = df2[df2["snapshot_date"] == latest_snap].copy()
-    compare_view = df2[df2["snapshot_date"] == comparison_snap].copy()
+    latest_view  = df2[df2["snapshot_date"] == latest_snap].copy()
+    compare_view = df2[df2["snapshot_date"] == comp_snap].copy()
 
     if latest_view.empty or compare_view.empty:
         st.warning("One of the snapshots has no data for this hotel.")
         return
 
-    # ── Grouping period column ──────────────────────────────────────────────
-    freq_map = {"Daily": "D", "Weekly": "W-MON", "Monthly": "ME", "Yearly": "YE"}
-    freq = freq_map[group_by]
+    def _agg_view(view):
+        view = kpi_engine.add_period_col(view, "date", group_by)
+        return kpi_engine.rm_aggregate(view, ["period", "period_label"]).set_index("period")
 
-    def _add_period(frame: pd.DataFrame) -> pd.DataFrame:
-        f = frame.copy()
-        if group_by == "Daily":
-            f["period"] = f["date"].dt.normalize()
-        elif group_by == "Weekly":
-            f["period"] = f["date"].dt.to_period("W").apply(lambda p: p.start_time)
-        elif group_by == "Monthly":
-            f["period"] = f["date"].dt.to_period("M").apply(lambda p: p.start_time)
-        else:
-            f["period"] = f["date"].dt.to_period("Y").apply(lambda p: p.start_time)
-        return f
+    agg_l = _agg_view(latest_view)
+    agg_c = _agg_view(compare_view)
 
-    # Use proper RM formulas — ADR = Σrev/Σrooms, Occ% = Σsold/Σavail
-    latest_agg = _rm_agg(_add_period(latest_view), "period", metric).set_index("period")[metric].rename("latest")
-    compare_agg = _rm_agg(_add_period(compare_view), "period", metric).set_index("period")[metric].rename("compare")
+    # Align on common periods
+    all_periods = agg_l.index.union(agg_c.index)
+    agg_l = agg_l.reindex(all_periods)
+    agg_c = agg_c.reindex(all_periods)
 
-    combined = pd.concat([latest_agg, compare_agg], axis=1).dropna(how="all").reset_index()
-    combined["pickup"] = combined["latest"].fillna(0) - combined["compare"].fillna(0)
-
-    if combined.empty:
-        st.info("No overlapping arrival dates between the two snapshots.")
-        return
-
-    # ── Main pickup bar chart ───────────────────────────────────────────────
     metric_label = metric.replace("_", " ").title()
-    period_labels = combined["period"].dt.strftime(
-        "%d %b %Y" if group_by == "Daily" else
-        "W %W %Y" if group_by == "Weekly" else
-        "%b %Y" if group_by == "Monthly" else "%Y"
-    )
+    labels = agg_l["period_label"].fillna(agg_c["period_label"]).values
+    vals_l = agg_l[metric].fillna(0).values if metric in agg_l.columns else np.zeros(len(all_periods))
+    vals_c = agg_c[metric].fillna(0).values if metric in agg_c.columns else np.zeros(len(all_periods))
+    pickup = vals_l - vals_c
 
-    colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"] for v in combined["pickup"]]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=period_labels,
-        y=combined["pickup"],
+    # ── Chart 1: Pickup bars ─────────────────────────────────────────────────
+    colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"] for v in pickup]
+    fig1 = go.Figure(go.Bar(
+        x=labels, y=pickup,
         marker_color=colors,
-        name=f"Pickup ({metric_label})",
-        text=[f"{v:+,.1f}" for v in combined["pickup"]],
+        text=[f"{v:+,.1f}" for v in pickup],
         textposition="outside",
+        name="Pickup",
+        hovertemplate="%{x}<br>Pickup: %{y:+,.1f}<extra></extra>",
     ))
-    fig.update_layout(
+    fig1.update_layout(
         title=f"{group_by} Pickup — {metric_label}  |  "
-              f"{comparison_snap.strftime('%d %b %Y')} → {latest_snap.strftime('%d %b %Y')}",
+              f"{comp_snap.strftime('%d %b %Y')} → {latest_snap.strftime('%d %b %Y')}",
         xaxis_title=f"Arrival Date ({group_by})",
         yaxis_title=f"Change in {metric_label}",
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
+        **_DARK,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig1, use_container_width=True)
 
-    # ── Side-by-side comparison ─────────────────────────────────────────────
-    st.subheader("Side-by-Side: Latest vs Comparison Snapshot")
+    # ── Chart 2: Side-by-side comparison ────────────────────────────────────
     fig2 = go.Figure()
     fig2.add_trace(go.Bar(
-        x=period_labels, y=combined["compare"],
-        name=f"As of {comparison_snap.strftime('%d %b %Y')}",
-        marker_color=BRAND_COLORS["neutral"],
-        opacity=0.8,
+        x=labels, y=vals_c,
+        name=f"As of {comp_snap.strftime('%d %b %Y')}",
+        marker_color=BRAND_COLORS["neutral"], opacity=0.75,
+        hovertemplate="%{x}<br>Comparison: %{y:,.1f}<extra></extra>",
     ))
     fig2.add_trace(go.Bar(
-        x=period_labels, y=combined["latest"],
+        x=labels, y=vals_l,
         name=f"As of {latest_snap.strftime('%d %b %Y')}",
-        marker_color=BRAND_COLORS["secondary"],
-        opacity=0.9,
+        marker_color=BRAND_COLORS["secondary"], opacity=0.9,
+        hovertemplate="%{x}<br>Latest: %{y:,.1f}<extra></extra>",
     ))
     fig2.update_layout(
         barmode="group",
-        title=f"{metric_label} On-Books: {group_by} View",
+        title=f"On-Books Comparison — {metric_label} by Arrival {group_by}",
         xaxis_title=f"Arrival Date ({group_by})",
         yaxis_title=metric_label,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
+        **_DARK,
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Summary KPIs — use correct RM formula for the whole period ──────────
-    # For additive metrics (rooms, revenue): sum all periods
-    # For derived metrics (ADR, Occ%): re-derive from the totals, not sum of derived values
-    is_derived = metric in ("adr", "occupancy_pct", "revpar")
-
-    if is_derived:
-        total_latest = float(_rm_agg(latest_view, pd.Series(["all"] * len(latest_view), index=latest_view.index)
-                                     .rename("_all").reset_index(drop=True).pipe(
-                                         lambda _: latest_view.assign(_all="all")), "_all", metric)[metric].iloc[0]) \
-            if False else float(_rm_agg(latest_view.assign(_all="all"), "_all", metric)[metric].iloc[0])
-        total_compare = float(_rm_agg(compare_view.assign(_all="all"), "_all", metric)[metric].iloc[0])
-    else:
-        total_latest = combined["latest"].sum()
-        total_compare = combined["compare"].sum()
-
-    total_pickup = total_latest - total_compare
-    pct_change = (total_pickup / abs(total_compare) * 100) if total_compare else 0
+    # ── KPI summary ──────────────────────────────────────────────────────────
+    # Re-derive totals from the full snapshot (not sum of derived values)
+    total_l   = float(kpi_engine.hotel_kpis(latest_view).get(metric, np.nan))
+    total_c   = float(kpi_engine.hotel_kpis(compare_view).get(metric, np.nan))
+    net       = total_l - total_c
+    pct_chg   = (net / abs(total_c) * 100) if total_c else np.nan
 
     k1, k2, k3, k4 = st.columns(4)
-    fmt = "{:.1f}%" if metric == "occupancy_pct" else "${:,.2f}" if metric in ("adr", "revpar") else "{:,.1f}"
-    k1.metric(f"{metric_label} (Latest)", fmt.format(total_latest))
-    k2.metric(f"{metric_label} (Comparison)", fmt.format(total_compare))
-    k3.metric("Net Pickup", f"{total_pickup:+,.1f}")
-    k4.metric("% Change", f"{pct_change:+.1f}%")
+    fmt_str = "{:.1f}%" if metric == "occupancy_pct" else "€{:,.2f}" if metric in ("adr","revpar") else "{:,.0f}"
+    k1.metric(f"Latest ({latest_snap.strftime('%d %b')})",    fmt_str.format(total_l) if not pd.isna(total_l) else "N/A")
+    k2.metric(f"Comparison ({comp_snap.strftime('%d %b')})",  fmt_str.format(total_c) if not pd.isna(total_c) else "N/A")
+    k3.metric("Net Pickup",  f"{net:+,.1f}" if not pd.isna(net) else "N/A")
+    k4.metric("% Change",    f"{pct_chg:+.1f}%" if not pd.isna(pct_chg) else "N/A")
+
+    # ── Export ───────────────────────────────────────────────────────────────
+    pickup_table = pd.DataFrame({
+        "Arrival Period": labels,
+        f"Comparison ({comp_snap.strftime('%d %b %Y')})": vals_c.round(2),
+        f"Latest ({latest_snap.strftime('%d %b %Y')})": vals_l.round(2),
+        "Pickup": pickup.round(2),
+    })
+    st.download_button(
+        "⬇️ Export Pickup to Excel",
+        data=exports.export_pickup(pickup_table),
+        file_name="pickup_analysis.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
-# ── Tab: Pace ─────────────────────────────────────────────────────────────────
+# ── Tab 3: Pace ───────────────────────────────────────────────────────────────
 
 def tab_pace(df: pd.DataFrame) -> None:
     """
-    Pace = for a selected arrival date (or range), how did the on-books
-    occupancy / rooms_sold / revenue change over time across snapshot dates?
+    Pace: for a selected arrival date (or range), show how the on-books
+    position evolved across ALL snapshot dates over time.
 
-    X-axis = snapshot date (time the report was exported)
-    Y-axis = on-books value for the selected arrival dates at that snapshot
+    X-axis = snapshot_date (the date the file was exported)
+    Y-axis = metric on-books for selected arrival dates at that snapshot
     """
-    import plotly.graph_objects as go
-
-    st.subheader("Pace Analysis")
     st.caption(
-        "Select an arrival date or date range below. "
-        "The chart shows how the on-books position for those dates "
-        "evolved over time as bookings accumulated."
+        "Select arrival dates below. The chart shows how bookings for those "
+        "dates built up over time across all snapshot exports."
     )
 
-    has_snapshots, _ = _render_snapshot_info(df)
-    metrics = [m for m in ["rooms_sold", "occupancy_pct", "revenue", "adr"] if m in df.columns]
-
-    if not metrics:
-        st.info("No metrics available for pace analysis.")
+    snaps = _snap_banner(df)
+    if len(snaps) < 2:
         return
 
-    if not has_snapshots:
-        return
+    available_metrics = [m for m in ["rooms_sold", "occupancy_pct", "revenue", "adr"]
+                         if m in df.columns]
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        metric = st.selectbox("Metric to track", available_metrics, key="pace_metric")
+    with c2:
+        mode = st.radio("Date selection", ["Single date", "Date range"],
+                        horizontal=True, key="pace_mode")
 
     df2 = df.copy()
     df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
     df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
     df2 = df2.dropna(subset=["snapshot_date", "date"])
 
-    all_snaps = sorted(df2["snapshot_date"].dropna().unique())
-    all_arrival_dates = sorted(df2["date"].dropna().unique())
+    all_dates = sorted(df2["date"].dropna().unique())
+    min_d = pd.Timestamp(all_dates[0]).date()
+    max_d = pd.Timestamp(all_dates[-1]).date()
 
-    if not all_arrival_dates:
-        st.info("No arrival dates found.")
-        return
+    # Default: first future date relative to latest snapshot
+    latest_snap = snaps[-1]
+    future_dates = [d for d in all_dates if pd.Timestamp(d) > latest_snap]
+    default_date = (pd.Timestamp(future_dates[0]) if future_dates
+                    else pd.Timestamp(all_dates[len(all_dates)//2])).date()
 
-    # ── Controls ────────────────────────────────────────────────────────────
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        metric = st.selectbox("Metric to track", metrics, key="pace_metric")
-    with c2:
-        selection_mode = st.radio(
-            "Date selection",
-            ["Single date", "Date range"],
-            horizontal=True,
-            key="pace_sel_mode",
-        )
-
-    min_arrival = pd.Timestamp(all_arrival_dates[0]).date()
-    max_arrival = pd.Timestamp(all_arrival_dates[-1]).date()
-
-    if selection_mode == "Single date":
-        # Default to a date roughly 30 days out from last snapshot
-        default_date = min(
-            pd.Timestamp(all_snaps[-1]) + pd.Timedelta(days=30),
-            pd.Timestamp(all_arrival_dates[-1]),
-        ).date()
-        default_date = max(default_date, min_arrival)
-
+    if mode == "Single date":
         sel_date = st.date_input(
-            "Arrival date",
-            value=default_date,
-            min_value=min_arrival,
-            max_value=max_arrival,
-            key="pace_single_date",
+            "Arrival date", value=default_date,
+            min_value=min_d, max_value=max_d, key="pace_single",
         )
         mask = df2["date"] == pd.Timestamp(sel_date)
         date_label = pd.Timestamp(sel_date).strftime("%d %b %Y")
     else:
-        default_start = min_arrival
-        default_end = max_arrival
-        date_range = st.date_input(
+        rng = st.date_input(
             "Arrival date range",
-            value=(default_start, default_end),
-            min_value=min_arrival,
-            max_value=max_arrival,
-            key="pace_date_range",
+            value=(default_date, min(max_d, (pd.Timestamp(default_date) + pd.Timedelta(days=30)).date())),
+            min_value=min_d, max_value=max_d, key="pace_range",
         )
-        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-            start_dt, end_dt = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+        if isinstance(rng, (list, tuple)) and len(rng) == 2:
+            s_dt, e_dt = pd.Timestamp(rng[0]), pd.Timestamp(rng[1])
         else:
-            start_dt = end_dt = pd.Timestamp(date_range[0])
-        mask = (df2["date"] >= start_dt) & (df2["date"] <= end_dt)
-        date_label = f"{start_dt.strftime('%d %b %Y')} – {end_dt.strftime('%d %b %Y')}"
+            s_dt = e_dt = pd.Timestamp(rng[0])
+        mask = (df2["date"] >= s_dt) & (df2["date"] <= e_dt)
+        date_label = f"{s_dt.strftime('%d %b %Y')} – {e_dt.strftime('%d %b %Y')}"
 
     selected = df2[mask].copy()
-
     if selected.empty:
         st.warning("No data for the selected arrival date(s). Try a different date.")
         return
 
-    # ── Aggregate by snapshot date using correct RM formulas ───────────────
-    # ADR = Σrev/Σrooms_sold,  Occ% = Σrooms_sold/Σrooms_avail,  RevPAR = Σrev/Σrooms_avail
-    pace_series = (
-        _rm_agg(selected, "snapshot_date", metric)
-        .sort_values("snapshot_date")
-        .reset_index(drop=True)
-    )
+    # Aggregate by snapshot using correct RM formulas
+    pace_agg = kpi_engine.rm_aggregate(selected, ["snapshot_date"]).sort_values("snapshot_date")
 
-    if pace_series.empty or len(pace_series) < 2:
-        st.info("Not enough snapshots to draw a pace curve for this date. "
-                "Try a broader date range.")
+    if len(pace_agg) < 2 or metric not in pace_agg.columns:
+        st.info("Not enough snapshots for the selected date(s). Try a broader date range.")
         return
 
-    # ── Pace curve ──────────────────────────────────────────────────────────
     metric_label = metric.replace("_", " ").title()
-    latest_val = float(pace_series[metric].iloc[-1])
-    first_val = float(pace_series[metric].iloc[0])
-    total_change = latest_val - first_val
-    pct_change = (total_change / abs(first_val) * 100) if first_val else 0
+    x = pace_agg["snapshot_date"]
+    y = pace_agg[metric]
 
+    # ── Pace curve ───────────────────────────────────────────────────────────
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=pace_series["snapshot_date"],
-        y=pace_series[metric],
+        x=x, y=y,
         mode="lines+markers",
         line=dict(color=BRAND_COLORS["secondary"], width=2.5),
         marker=dict(size=7, color=BRAND_COLORS["accent"]),
         name=metric_label,
-        hovertemplate="%{x|%d %b %Y}<br>" + metric_label + ": %{y:,.1f}<extra></extra>",
-    ))
-    # Shade the area under the curve
-    fig.add_trace(go.Scatter(
-        x=pace_series["snapshot_date"],
-        y=pace_series[metric],
+        hovertemplate="%{x|%d %b %Y}<br>" + metric_label + ": %{y:,.2f}<extra></extra>",
         fill="tozeroy",
-        fillcolor="rgba(46,134,193,0.12)",
-        line=dict(width=0),
-        showlegend=False,
-        hoverinfo="skip",
+        fillcolor="rgba(46,134,193,0.10)",
     ))
+
+    # Annotate days-before-arrival milestones (90d, 60d, 30d, 14d, 7d)
+    if mode == "Single date":
+        arrival_ts = pd.Timestamp(sel_date)
+        for days_before, label in [(90, "90d"), (60, "60d"), (30, "30d"), (14, "14d"), (7, "7d")]:
+            milestone_date = arrival_ts - pd.Timedelta(days=days_before)
+            if x.min() <= milestone_date <= x.max():
+                fig.add_vline(
+                    x=milestone_date.timestamp() * 1000,
+                    line_dash="dot", line_color="rgba(255,255,255,0.25)",
+                    annotation_text=label,
+                    annotation_position="top",
+                    annotation_font_color="#94a3b8",
+                )
+
     fig.update_layout(
-        title=f"Pace of {metric_label} for Arrival Date(s): {date_label}",
-        xaxis_title="Snapshot Date (as-of date of the report)",
+        title=f"Pace of {metric_label} for Arrival: {date_label}",
+        xaxis_title="Snapshot Date (when file was exported)",
         yaxis_title=metric_label,
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
         hovermode="x unified",
+        **_DARK,
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── KPI row ─────────────────────────────────────────────────────────────
+    # ── KPI summary ──────────────────────────────────────────────────────────
+    first_val  = float(y.iloc[0])
+    latest_val = float(y.iloc[-1])
+    net_change = latest_val - first_val
+    pct_change = (net_change / abs(first_val) * 100) if first_val else np.nan
+
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"Earliest on-books ({pd.Timestamp(pace_series['snapshot_date'].iloc[0]).strftime('%d %b')})",
-              f"{first_val:,.1f}")
-    k2.metric(f"Latest on-books ({pd.Timestamp(pace_series['snapshot_date'].iloc[-1]).strftime('%d %b')})",
-              f"{latest_val:,.1f}")
-    k3.metric("Total Change", f"{total_change:+,.1f}")
-    k4.metric("% Change", f"{pct_change:+.1f}%")
+    k1.metric(f"First on-books ({pd.Timestamp(x.iloc[0]).strftime('%d %b')})",
+              _fmt(first_val, metric))
+    k2.metric(f"Latest on-books ({pd.Timestamp(x.iloc[-1]).strftime('%d %b')})",
+              _fmt(latest_val, metric))
+    k3.metric("Total Change",   f"{net_change:+,.1f}")
+    k4.metric("% Change",       f"{pct_change:+.1f}%" if not pd.isna(pct_change) else "N/A")
 
-    # ── Period-over-period pace comparison ──────────────────────────────────
-    st.subheader("Weekly Pace Change")
-    st.caption("Change in on-books from one snapshot to the one 7 days earlier.")
-    # diff on the correctly-derived metric series (already one row per snapshot)
-    pace_series = pace_series.copy()
-    pace_series["weekly_change"] = pace_series[metric].diff(
-        min(7, max(1, len(pace_series) // 4))
-    ).fillna(pace_series[metric].diff(1))
-    fig2 = go.Figure()
-    colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"]
-              for v in pace_series["weekly_change"]]
-    fig2.add_trace(go.Bar(
-        x=pace_series["snapshot_date"],
-        y=pace_series["weekly_change"],
-        marker_color=colors,
-        name="7-Day Change",
-        hovertemplate="%{x|%d %b %Y}<br>Change: %{y:+,.1f}<extra></extra>",
-    ))
-    fig2.update_layout(
-        title=f"Week-over-Week Change in {metric_label} (for {date_label})",
-        xaxis_title="Snapshot Date",
-        yaxis_title=f"Change in {metric_label}",
-        template="plotly_dark",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
-    )
-    st.plotly_chart(fig2, use_container_width=True)
+    # ── Week-over-week change ────────────────────────────────────────────────
+    st.subheader("Weekly Pickup Velocity")
+    st.caption("How much the on-books changed from snapshot to snapshot (7-day step).")
+    step = min(7, max(1, len(pace_agg) // 5))
+    pace_agg = pace_agg.copy()
+    pace_agg["weekly_chg"] = y.diff(step).values
+    pace_agg = pace_agg.dropna(subset=["weekly_chg"])
 
-    # ── Multi-metric comparison (if date range selected) ────────────────────
-    if selection_mode == "Date range" and len(metrics) > 1:
-        st.subheader("Multi-Metric Pace Overview")
-        available = [m for m in ["rooms_sold", "occupancy_pct", "revenue"] if m in df2.columns]
-        if len(available) >= 2:
+    if not pace_agg.empty:
+        wcolors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"]
+                   for v in pace_agg["weekly_chg"]]
+        fig2 = go.Figure(go.Bar(
+            x=pace_agg["snapshot_date"],
+            y=pace_agg["weekly_chg"],
+            marker_color=wcolors,
+            hovertemplate="%{x|%d %b %Y}<br>Change: %{y:+,.1f}<extra></extra>",
+        ))
+        fig2.update_layout(
+            title=f"{step}-Step Pickup Velocity — {metric_label} for {date_label}",
+            xaxis_title="Snapshot Date",
+            yaxis_title=f"Change in {metric_label}",
+            showlegend=False,
+            **_DARK,
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Multi-metric pace index (date range mode) ────────────────────────────
+    if mode == "Date range":
+        st.subheader("Multi-Metric Pace Index")
+        st.caption("All metrics normalised to 100 at the first snapshot to compare momentum.")
+        multi_metrics = [m for m in ["rooms_sold", "occupancy_pct", "revenue"] if m in df2.columns]
+        if len(multi_metrics) >= 2:
             fig3 = go.Figure()
-            color_cycle = [BRAND_COLORS["secondary"], BRAND_COLORS["accent"],
-                           BRAND_COLORS["success"], BRAND_COLORS["warning"]]
-            for i, m in enumerate(available):
-                s = _rm_agg(selected, "snapshot_date", m).sort_values("snapshot_date")
-                if s.empty:
+            palette = [BRAND_COLORS["secondary"], BRAND_COLORS["accent"],
+                       BRAND_COLORS["success"], BRAND_COLORS["warning"]]
+            for i, m in enumerate(multi_metrics):
+                s = kpi_engine.rm_aggregate(selected, ["snapshot_date"]).sort_values("snapshot_date")
+                if m not in s.columns:
                     continue
-                # Normalise to index (100 = first snapshot) for comparison
                 base = s[m].iloc[0]
                 if base and base != 0:
-                    s["indexed"] = s[m] / base * 100
+                    s["idx"] = s[m] / base * 100
                     fig3.add_trace(go.Scatter(
-                        x=s["snapshot_date"], y=s["indexed"],
+                        x=s["snapshot_date"], y=s["idx"],
                         mode="lines+markers",
                         name=m.replace("_", " ").title(),
-                        line=dict(color=color_cycle[i % len(color_cycle)], width=2),
+                        line=dict(color=palette[i % len(palette)], width=2),
                     ))
-            fig3.add_hline(y=100, line_dash="dash", line_color="white", opacity=0.3,
-                           annotation_text="Baseline (first snapshot)")
+            fig3.add_hline(y=100, line_dash="dash", line_color="rgba(255,255,255,0.3)",
+                           annotation_text="Baseline")
             fig3.update_layout(
-                title="Pace Index (100 = first snapshot) — All Metrics",
+                title="Pace Index — 100 = First Snapshot",
                 xaxis_title="Snapshot Date",
-                yaxis_title="Index (100 = first snapshot)",
-                template="plotly_dark",
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)",
+                yaxis_title="Index (100 = baseline)",
+                **_DARK,
             )
             st.plotly_chart(fig3, use_container_width=True)
 
-    # ── Raw data table ──────────────────────────────────────────────────────
-    with st.expander("Show raw pace data"):
-        display = pace_series.copy()
-        display["snapshot_date"] = display["snapshot_date"].dt.strftime("%d %b %Y")
-        st.dataframe(display.rename(columns={metric: metric_label}),
+    # ── Raw data ─────────────────────────────────────────────────────────────
+    with st.expander("📋 Raw pace data"):
+        show = pace_agg[["snapshot_date", metric]].copy()
+        show["snapshot_date"] = show["snapshot_date"].dt.strftime("%d %b %Y")
+        show.columns = ["Snapshot Date", metric_label]
+        st.dataframe(show.round(2), use_container_width=True, hide_index=True)
+
+
+# ── Tab 4: Performance ────────────────────────────────────────────────────────
+
+def tab_performance(df: pd.DataFrame) -> None:
+    """Historical performance — aggregated from all snapshot data."""
+
+    st.caption(
+        "Performance uses the latest snapshot to show actuals for each arrival date. "
+        "Aggregations use correct RM formulas (ADR = Σrev/Σrooms, Occ = Σsold/Σavail)."
+    )
+
+    # Use latest snapshot for performance
+    snaps = kpi_engine.get_snapshots(df)
+    current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    current["date"] = pd.to_datetime(current["date"], errors="coerce")
+
+    kpis = kpi_engine.hotel_kpis(current)
+    _kpi_row(kpis)
+    st.markdown("---")
+
+    c1, c2, c3, c4 = st.columns(2), st.columns(2), st.columns(2), st.columns(2)
+
+    # Monthly breakdown
+    st.subheader("Monthly KPIs")
+    monthly = kpi_engine.aggregate_period(current, "Monthly")
+    if not monthly.empty:
+        col1, col2 = st.columns(2)
+        with col1:
+            if "occupancy_pct" in monthly.columns:
+                fig = go.Figure(go.Bar(
+                    x=monthly["period_label"], y=monthly["occupancy_pct"],
+                    marker_color=BRAND_COLORS["secondary"],
+                    text=[f"{v:.1f}%" for v in monthly["occupancy_pct"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(title="Monthly Occupancy %", **_DARK)
+                st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            if "revenue" in monthly.columns:
+                fig = go.Figure(go.Bar(
+                    x=monthly["period_label"], y=monthly["revenue"],
+                    marker_color=BRAND_COLORS["success"],
+                    text=[f"€{v/1000:,.0f}k" for v in monthly["revenue"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(title="Monthly Revenue", **_DARK)
+                st.plotly_chart(fig, use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            if "adr" in monthly.columns:
+                fig = go.Figure(go.Bar(
+                    x=monthly["period_label"], y=monthly["adr"],
+                    marker_color=BRAND_COLORS["accent"],
+                    text=[f"€{v:,.0f}" for v in monthly["adr"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(title="Monthly ADR (Σrev / Σrooms_sold)", **_DARK)
+                st.plotly_chart(fig, use_container_width=True)
+        with col4:
+            if "revpar" in monthly.columns:
+                fig = go.Figure(go.Bar(
+                    x=monthly["period_label"], y=monthly["revpar"],
+                    marker_color=BRAND_COLORS["warning"],
+                    text=[f"€{v:,.0f}" for v in monthly["revpar"]],
+                    textposition="outside",
+                ))
+                fig.update_layout(title="Monthly RevPAR (Σrev / Σrooms_avail)", **_DARK)
+                st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("📋 Monthly KPI Table"):
+            show_cols = [c for c in ["period_label","rooms_sold","rooms_available",
+                                      "occupancy_pct","adr","revpar","revenue"] if c in monthly.columns]
+            show = monthly[show_cols].copy()
+            show.columns = [c.replace("_"," ").title() for c in show.columns]
+            st.dataframe(show.round(2), use_container_width=True, hide_index=True)
+
+    # Weekday analysis
+    st.subheader("Weekday Analysis")
+    if "day_of_week" in current.columns:
+        weekday = kpi_engine.weekday_performance(current)
+        if not weekday.empty:
+            col5, col6 = st.columns(2)
+            with col5:
+                if "occupancy_pct" in weekday.columns:
+                    fig = go.Figure(go.Bar(
+                        x=weekday["day_name"], y=weekday["occupancy_pct"],
+                        marker_color=BRAND_COLORS["primary"],
+                        text=[f"{v:.1f}%" for v in weekday["occupancy_pct"]],
+                        textposition="outside",
+                    ))
+                    fig.update_layout(title="Occupancy by Weekday", **_DARK)
+                    st.plotly_chart(fig, use_container_width=True)
+            with col6:
+                if "adr" in weekday.columns:
+                    fig = go.Figure(go.Bar(
+                        x=weekday["day_name"], y=weekday["adr"],
+                        marker_color=BRAND_COLORS["accent"],
+                        text=[f"€{v:,.0f}" for v in weekday["adr"]],
+                        textposition="outside",
+                    ))
+                    fig.update_layout(title="ADR by Weekday", **_DARK)
+                    st.plotly_chart(fig, use_container_width=True)
+
+    # Compression nights
+    st.subheader(f"High-Demand Dates (Occupancy ≥ {COMPRESSION_THRESHOLD}%)")
+    comp = kpi_engine.compression_nights(current, COMPRESSION_THRESHOLD)
+    if not comp.empty:
+        st.metric("High-Demand Dates", len(comp))
+        show_cols = [c for c in ["date","occupancy_pct","adr","revpar","revenue"] if c in comp.columns]
+        st.dataframe(comp[show_cols].sort_values("date").round(2),
                      use_container_width=True, hide_index=True)
+    else:
+        st.info(f"No dates with occupancy ≥ {COMPRESSION_THRESHOLD}%.")
 
 
-# ── Tab: Forecasting ──────────────────────────────────────────────────────────
+# ── Tab 5: Forecast ───────────────────────────────────────────────────────────
 
-def tab_forecasting(df: pd.DataFrame, method: str, horizon: int) -> None:
-    st.subheader("Demand Forecasting")
-    metrics = [m for m in ["revpar", "revenue", "occupancy_pct", "adr", "rooms_sold"] if m in df.columns]
+def tab_forecast(df: pd.DataFrame, method: str, horizon: int) -> None:
+    st.subheader("Demand Forecast")
+
+    metrics = [m for m in ["rooms_sold", "revenue", "occupancy_pct", "adr"] if m in df.columns]
     if not metrics:
         st.error("No forecastable metrics found.")
         return
 
-    selected = st.selectbox("Forecast Metric", metrics, key="hotel_forecast_metric")
+    metric = st.selectbox("Metric", metrics, key="fc_metric")
 
-    with st.spinner(f"Running {method} forecast for {selected}…"):
-        fcast = forecasting.run_forecast(df, method=method, metric=selected, horizon=horizon)
+    # Use the latest snapshot for forecasting
+    snaps = kpi_engine.get_snapshots(df)
+    source = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+    source["date"] = pd.to_datetime(source["date"], errors="coerce")
 
-    if fcast is None or fcast.empty:
-        st.error("Forecast failed — not enough data or missing dependency.")
+    # Daily series for the chosen metric (correct RM formula)
+    daily = kpi_engine.rm_aggregate(source, ["date"]).sort_values("date")
+    if daily.empty or metric not in daily.columns:
+        st.info("Not enough data for forecast.")
         return
 
-    daily = kpi_engine.aggregate_daily(df)
-    fig = visualizations.forecast_chart(daily, fcast, selected, title=f"{selected.upper()} Forecast ({method})")
+    with st.spinner(f"Running {method} forecast…"):
+        fcast = forecasting.run_forecast(daily, method=method, metric=metric, horizon=horizon)
+
+    if fcast is None or fcast.empty:
+        st.error("Forecast failed — not enough history or missing dependency.")
+        return
+
+    # Chart
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=daily["date"], y=daily[metric],
+        mode="lines", name="Actual/On-Books",
+        line=dict(color=BRAND_COLORS["secondary"], width=2),
+    ))
+    fig_fcast = fcast[fcast["is_forecast"]] if "is_forecast" in fcast.columns else fcast
+    fig.add_trace(go.Scatter(
+        x=fig_fcast["date"], y=fig_fcast["forecast"],
+        mode="lines", name=f"{method} Forecast",
+        line=dict(color=BRAND_COLORS["accent"], width=2, dash="dash"),
+    ))
+    if "upper_80" in fcast.columns and "lower_80" in fcast.columns:
+        fig.add_trace(go.Scatter(
+            x=list(fig_fcast["date"]) + list(fig_fcast["date"][::-1]),
+            y=list(fig_fcast["upper_80"]) + list(fig_fcast["lower_80"][::-1]),
+            fill="toself", fillcolor="rgba(243,156,18,0.12)",
+            line=dict(width=0), name="80% CI",
+        ))
+    fig.update_layout(
+        title=f"{metric.replace('_',' ').title()} — {method} Forecast ({horizon} days)",
+        xaxis_title="Date", yaxis_title=metric.replace("_", " ").title(),
+        hovermode="x unified", **_DARK,
+    )
     st.plotly_chart(fig, use_container_width=True)
 
     # Accuracy
-    acc = forecasting.compute_forecast_accuracy(daily, fcast, selected)
+    acc = forecasting.compute_forecast_accuracy(daily, fcast, metric)
     if acc:
-        st.subheader("Forecast Accuracy")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("MAPE", f"{acc.get('MAPE_%', 'N/A')}%")
-        c2.metric("MAE", f"{acc.get('MAE', 'N/A'):,.2f}")
-        c3.metric("RMSE", f"{acc.get('RMSE', 'N/A'):,.2f}")
+        st.subheader("Forecast Accuracy (on historical data)")
+        a1, a2, a3 = st.columns(3)
+        a1.metric("MAPE", f"{acc.get('MAPE_%', 'N/A')}%")
+        a2.metric("MAE",  f"{acc.get('MAE', 'N/A'):,.2f}")
+        a3.metric("RMSE", f"{acc.get('RMSE', 'N/A'):,.2f}")
 
-    # Table
-    with st.expander("Forecast Table"):
-        disp = fcast[fcast.get("is_forecast", True)].copy() if "is_forecast" in fcast.columns else fcast.copy()
-        st.dataframe(disp[["date", "forecast", "lower_80", "upper_80"]].round(2),
-                     use_container_width=True, hide_index=True)
+    with st.expander("📋 Forecast Table"):
+        show = (fig_fcast[["date","forecast","lower_80","upper_80"]].round(2)
+                if "lower_80" in fig_fcast.columns
+                else fig_fcast[["date","forecast"]].round(2))
+        st.dataframe(show, use_container_width=True, hide_index=True)
+
+    st.download_button(
+        "⬇️ Export Forecast",
+        data=exports.export_forecast(fcast, acc),
+        file_name="forecast.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
-# ── Tab: Anomalies ────────────────────────────────────────────────────────────
+# ── Tab 6: Anomalies ──────────────────────────────────────────────────────────
 
 def tab_anomalies(df: pd.DataFrame) -> None:
     st.subheader("Anomaly Detection")
-    flagged = anomaly_detection.detect_anomalies(df)
-    summary = anomaly_detection.anomaly_summary(flagged)
 
-    n_anom = int(flagged["anomaly_flag"].sum()) if "anomaly_flag" in flagged.columns else 0
-    st.metric("Anomalies Detected", n_anom)
+    source = kpi_engine.latest_snapshot_view(df) if kpi_engine.get_snapshots(df) else df.copy()
+    daily = kpi_engine.rm_aggregate(source, ["date"]).sort_values("date") if not source.empty else pd.DataFrame()
+
+    if daily.empty:
+        st.info("No data available for anomaly detection.")
+        return
+
+    flagged = anomaly_detection.detect_anomalies(daily)
+    summary = anomaly_detection.anomaly_summary(flagged)
+    n = int(flagged["anomaly_flag"].sum()) if "anomaly_flag" in flagged.columns else 0
+    st.metric("Anomalies Detected", n)
 
     if not summary.empty:
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
-        if "date" in flagged.columns and "revenue" in flagged.columns:
-            daily = kpi_engine.aggregate_daily(df)
-            import plotly.graph_objects as go
-            fig = go.Figure()
+    # Revenue with anomaly flags
+    if "date" in flagged.columns and "revenue" in flagged.columns:
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=flagged["date"], y=flagged["revenue"],
+            mode="lines", name="Revenue",
+            line=dict(color=BRAND_COLORS["secondary"]),
+        ))
+        anom_pts = flagged[flagged["anomaly_flag"]] if "anomaly_flag" in flagged.columns else pd.DataFrame()
+        if not anom_pts.empty:
             fig.add_trace(go.Scatter(
-                x=daily["date"], y=daily["revenue"],
-                mode="lines", name="Revenue",
-                line=dict(color=BRAND_COLORS["secondary"]),
+                x=anom_pts["date"], y=anom_pts["revenue"],
+                mode="markers", name="Anomaly",
+                marker=dict(color=BRAND_COLORS["danger"], size=10, symbol="x"),
             ))
-            anom_pts = flagged[flagged["anomaly_flag"]] if "anomaly_flag" in flagged.columns else pd.DataFrame()
-            if not anom_pts.empty and "revenue" in anom_pts.columns:
-                fig.add_trace(go.Scatter(
-                    x=anom_pts["date"], y=anom_pts["revenue"],
-                    mode="markers", name="Anomaly",
-                    marker=dict(color=BRAND_COLORS["danger"], size=10, symbol="x"),
-                ))
-            fig.update_layout(title="Revenue with Anomalies", **{
-                "template": "plotly_dark",
-                "paper_bgcolor": "rgba(0,0,0,0)",
-                "plot_bgcolor": "rgba(0,0,0,0)",
-            })
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.success("No anomalies detected in the selected date range.")
+        fig.update_layout(title="Revenue with Anomaly Flags", **_DARK)
+        st.plotly_chart(fig, use_container_width=True)
+
+    if summary.empty:
+        st.success("✅ No anomalies detected in the current data.")
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Main entry ────────────────────────────────────────────────────────────────
 
 def render(
     df: pd.DataFrame,
     hotel: str,
-    forecast_method: str = "Prophet",
-    forecast_horizon: int = 90,
+    fc_method: str = "Prophet",
+    fc_horizon: int = 90,
+    file_reports: Optional[list] = None,
 ) -> None:
-    """Render the full hotel-level dashboard with tabs."""
     hotel_df = df[df["hotel_name"] == hotel].copy() if "hotel_name" in df.columns else df.copy()
+    hotel_df["date"] = pd.to_datetime(hotel_df["date"], errors="coerce")
+    hotel_df["snapshot_date"] = pd.to_datetime(hotel_df.get("snapshot_date", pd.NaT), errors="coerce")
 
     if hotel_df.empty:
-        st.warning(f"No data found for hotel: {hotel}")
+        st.warning(f"No data for hotel: {hotel}")
         return
 
-    st.markdown(f"## 🏨 {hotel}")
-    st.caption(f"{len(hotel_df):,} records | {hotel_df['date'].min().date()} → {hotel_df['date'].max().date()}" if "date" in hotel_df.columns else "")
+    # Header
+    snaps = kpi_engine.get_snapshots(hotel_df)
+    latest_snap = snaps[-1] if snaps else None
+    n_snaps = len(snaps)
+    date_min = hotel_df["date"].min()
+    date_max = hotel_df["date"].max()
 
-    tabs = st.tabs(["📊 Overview", "📈 Performance", "🔄 Pickup", "⏱ Pace",
-                    "🔮 Forecasting", "⚠️ Anomalies"])
+    st.markdown(f"## 🏨 {hotel}")
+    cols = st.columns(4)
+    cols[0].metric("Records", f"{len(hotel_df):,}")
+    cols[1].metric("Snapshots", f"{n_snaps}")
+    cols[2].metric("Arrival dates", f"{date_min.strftime('%d %b %Y') if pd.notna(date_min) else 'N/A'}")
+    cols[3].metric("→", f"{date_max.strftime('%d %b %Y') if pd.notna(date_max) else 'N/A'}")
+
+    if latest_snap:
+        st.caption(f"📅 Latest snapshot: **{latest_snap.strftime('%d %b %Y')}**  ·  "
+                   f"On-books for {(date_max - latest_snap).days if pd.notna(date_max) else '?'} days ahead")
+
+    st.markdown("---")
+
+    tabs = st.tabs([
+        "📍 Current Position",
+        "📈 Pickup",
+        "⏱️ Pace",
+        "📊 Performance",
+        "🔮 Forecast",
+        "⚠️ Anomalies",
+    ])
 
     with tabs[0]:
-        tab_overview(hotel_df, hotel)
+        tab_current_position(hotel_df, hotel)
     with tabs[1]:
-        tab_performance(hotel_df)
-    with tabs[2]:
         tab_pickup(hotel_df)
-    with tabs[3]:
+    with tabs[2]:
         tab_pace(hotel_df)
+    with tabs[3]:
+        tab_performance(hotel_df)
     with tabs[4]:
-        tab_forecasting(hotel_df, forecast_method, forecast_horizon)
+        tab_forecast(hotel_df, fc_method, fc_horizon)
     with tabs[5]:
         tab_anomalies(hotel_df)

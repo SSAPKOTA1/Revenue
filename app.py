@@ -1,8 +1,6 @@
 """
 Hotel Revenue Management Analytics Platform
 ============================================
-Main Streamlit application entry point.
-
 Run:  streamlit run app.py
 """
 
@@ -12,17 +10,15 @@ import traceback
 from pathlib import Path
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 
-# ── Ensure project root on path ────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config.settings import (
     APP_TITLE, APP_ICON, APP_VERSION,
-    LOG_FILE, OUTPUT_DIR,
+    LOG_FILE,
     FORECAST_HORIZONS, FORECAST_METHODS,
     DEFAULT_DATA_FOLDER,
 )
@@ -30,8 +26,8 @@ from modules import (
     data_loader, data_validator, data_cleaner,
     kpi_engine, exports,
     hotel_dashboard, portfolio_dashboard,
+    cache_manager,
 )
-from modules import cache_manager
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -44,7 +40,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title=APP_TITLE,
@@ -53,84 +48,83 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── Inline CSS (avoids Windows file encoding issues) ──────────────────────
+st.markdown("""<style>
+[data-testid="stAppViewContainer"] { background: #0f1117; }
+[data-testid="stSidebar"] { background: #1a1f2e; }
+h1,h2,h3,h4 { color: #e2e8f0; }
+.main-header { padding: 1rem 0 0.5rem; border-bottom: 1px solid #2d3748; margin-bottom: 1rem; }
+.main-header h1 { font-size: 1.8rem; color: #60a5fa; margin: 0; }
+.main-header p  { color: #94a3b8; margin: 0; font-size: 0.85rem; }
+.kpi-card { background: #1e2a3a; border-radius: 8px; padding: 1rem 1.2rem;
+            border-left: 3px solid #3b82f6; margin-bottom: 0.5rem; }
+.kpi-value { font-size: 1.6rem; font-weight: 700; color: #60a5fa; }
+.kpi-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; }
+</style>""", unsafe_allow_html=True)
 
-# ── CSS ────────────────────────────────────────────────────────────────────
-@st.cache_resource
-def _load_css() -> None:
-    css_path = ROOT / "assets" / "styles.css"
-    if css_path.exists():
-        with open(css_path, encoding="utf-8") as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# ── Header ─────────────────────────────────────────────────────────────────
+def _header() -> None:
+    st.markdown(
+        f'<div class="main-header"><h1>{APP_ICON} {APP_TITLE}</h1>'
+        f'<p>Professional Revenue Management Analytics · v{APP_VERSION}</p></div>',
+        unsafe_allow_html=True,
+    )
 
 
-_load_css()
-
-
-# ── Cached data loading ────────────────────────────────────────────────────
-
-@st.cache_data(show_spinner=False, ttl=3600)
-def load_data(root_folder: str) -> tuple[pd.DataFrame, list[dict]]:
-    """Load and clean all data from the selected folder."""
-    logger.info("Loading data from: %s", root_folder)
-    raw_df, file_reports = data_loader.load_all_files(root_folder)
+# ── Data loading ────────────────────────────────────────────────────────────
+def _do_scan(folder: str) -> tuple[pd.DataFrame, list[dict]]:
+    raw_df, file_reports = data_loader.load_all_files(folder)
     if raw_df.empty:
         return raw_df, file_reports
     cleaned = data_cleaner.clean(raw_df)
     return cleaned, file_reports
 
 
-# ── Header ────────────────────────────────────────────────────────────────
+def _load_from_cache_or_scan(folder: str, force: bool = False) -> tuple[pd.DataFrame, list[dict], str]:
+    """Returns (df, file_reports, source) where source is 'cache' or 'scan'."""
+    if not force:
+        is_valid, reason = cache_manager.cache_is_valid(folder)
+        if is_valid:
+            cached_df, _ = cache_manager.load_cache()
+            if cached_df is not None:
+                return cached_df, [], "cache"
+    df, reports = _do_scan(folder)
+    if not df.empty:
+        cache_manager.save_cache(df, folder, reports)
+    return df, reports, "scan"
 
-def render_header() -> None:
-    st.markdown(
-        f"""<div class="main-header">
-          <h1>{APP_ICON} {APP_TITLE}</h1>
-          <p>Professional Revenue Management Analytics · v{APP_VERSION}</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
 
-
-# ── Sidebar ────────────────────────────────────────────────────────────────
-
-def render_sidebar(df: pd.DataFrame) -> dict:
-    """Render the sidebar and return user selections as a dict."""
+# ── Sidebar ─────────────────────────────────────────────────────────────────
+def _sidebar(df: pd.DataFrame) -> dict:
     with st.sidebar:
         st.markdown("## ⚙️ Controls")
-        st.markdown("---")
 
-        # ── Folder selection ───────────────────────────────────────────────
+        # ── Data source ────────────────────────────────────────────────────
         st.markdown("### 📁 Data Source")
-        st.caption(
-            "The app scans **all subfolders** automatically. "
-            "Just point it at the root folder."
-        )
-        # Use saved folder, then default from config, then empty
-        _default_folder = st.session_state.get("last_folder", DEFAULT_DATA_FOLDER or "")
-        folder_input = st.text_input(
+        default_folder = st.session_state.get("last_folder", DEFAULT_DATA_FOLDER or "")
+        folder = st.text_input(
             "Root Data Folder",
-            value=_default_folder,
+            value=default_folder,
             placeholder=r"U:\Your\Data\Folder",
             help=(
                 "Full path to your root data folder.\n"
-                "All subfolders are scanned automatically.\n\n"
-                "Example:\n"
-                r"U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
+                "Subfolders: Year / Month / Day / HotelName.xlsx\n\n"
+                r"Example: U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
             ),
         )
         load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True, type="primary")
-        force_refresh = st.button("⚡ Force Re-scan (bypass cache)", use_container_width=True)
+        force_btn = st.button("⚡ Force Re-scan (bypass cache)", use_container_width=True)
 
-        # ── Cache info ────────────────────────────────────────────────────
-        cache_info = cache_manager.get_cache_info()
-        if cache_info:
+        # ── Cache info ─────────────────────────────────────────────────────
+        info = cache_manager.get_cache_info()
+        if info:
             st.markdown(
-                f"<div style='background:#1e2a3a;border-radius:6px;padding:8px 12px;font-size:0.78rem;color:#94A3B8;'>"
-                f"💾 <b>Cache</b>: {cache_info.get('saved_at_display','?')} · "
-                f"{cache_info.get('rows',0):,} rows · "
-                f"{cache_info.get('hotels',0)} hotels · "
-                f"{cache_info.get('cache_size_mb',0)} MB"
-                f"</div>",
+                f"<div style='background:#1e2a3a;border-radius:6px;padding:8px 12px;"
+                f"font-size:0.78rem;color:#94A3B8;margin-bottom:4px;'>"
+                f"💾 Cache: {info.get('saved_at_display','?')} · "
+                f"{info.get('rows',0):,} rows · {info.get('hotels',0)} hotels · "
+                f"{info.get('cache_size_mb',0)} MB</div>",
                 unsafe_allow_html=True,
             )
             if st.button("🗑️ Clear Cache", use_container_width=True):
@@ -138,448 +132,310 @@ def render_sidebar(df: pd.DataFrame) -> dict:
                 st.sidebar.success("Cache cleared.")
                 st.rerun()
 
+        # ── Snapshot summary ───────────────────────────────────────────────
+        if not df.empty:
+            snaps = kpi_engine.get_snapshots(df)
+            if snaps:
+                st.markdown(
+                    f"<div style='background:#162032;border-radius:6px;padding:6px 12px;"
+                    f"font-size:0.78rem;color:#60a5fa;'>"
+                    f"📅 {len(snaps)} snapshots · "
+                    f"{snaps[0].strftime('%d %b')} → {snaps[-1].strftime('%d %b %Y')}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
         st.markdown("---")
 
-        # ── Analysis mode ──────────────────────────────────────────────────
+        # ── Mode & hotel ───────────────────────────────────────────────────
         st.markdown("### 🎯 Analysis Mode")
-        mode = st.radio(
-            "Mode", ["Hotel Level", "Portfolio Level"],
-            label_visibility="collapsed",
-        )
+        mode = st.radio("Mode", ["Hotel Level", "Portfolio Level"], label_visibility="collapsed")
 
-        # ── Hotel selector (only in hotel mode) ───────────────────────────
         selected_hotel = None
         if mode == "Hotel Level" and not df.empty and "hotel_name" in df.columns:
-            hotels = sorted(df["hotel_name"].unique())
+            hotels = sorted(df["hotel_name"].dropna().unique())
             selected_hotel = st.selectbox("🏨 Select Hotel", hotels)
 
         st.markdown("---")
 
-        # ── Date range filter ──────────────────────────────────────────────
-        st.markdown("### 📅 Date Range")
+        # ── Date range ─────────────────────────────────────────────────────
+        st.markdown("### 📅 Date Range (Arrival)")
         date_min = date_max = None
         if not df.empty and "date" in df.columns:
             d_min = df["date"].min().date()
             d_max = df["date"].max().date()
-            date_min, date_max = st.date_input(
+            date_range = st.date_input(
                 "Date Range",
                 value=(d_min, d_max),
                 min_value=d_min,
                 max_value=d_max,
                 label_visibility="collapsed",
             )
+            if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+                date_min, date_max = date_range
 
         st.markdown("---")
 
-        # ── Forecast settings ──────────────────────────────────────────────
+        # ── Forecast ───────────────────────────────────────────────────────
         st.markdown("### 🔮 Forecasting")
-        forecast_method = st.selectbox("Method", FORECAST_METHODS)
-        forecast_horizon = st.selectbox(
-            "Horizon (days)", FORECAST_HORIZONS, index=1,
-        )
+        fc_method = st.selectbox("Method", FORECAST_METHODS)
+        fc_horizon = st.selectbox("Horizon (days)", FORECAST_HORIZONS, index=1)
 
         st.markdown("---")
-
-        # ── Theme ─────────────────────────────────────────────────────────
-        st.markdown("### 🎨 Theme")
-        st.selectbox("Color Theme", ["Dark (Default)", "Midnight Blue", "Slate"], key="theme")
-
-        st.markdown("---")
-        st.caption(f"v{APP_VERSION} · Built with Streamlit")
+        st.caption(f"v{APP_VERSION} · Hotel Revenue Analytics")
 
     return {
-        "folder": folder_input,
+        "folder": folder,
         "load": load_btn,
-        "force_refresh": force_refresh,
+        "force": force_btn,
         "mode": mode,
         "hotel": selected_hotel,
         "date_min": date_min,
         "date_max": date_max,
-        "forecast_method": forecast_method,
-        "forecast_horizon": forecast_horizon,
+        "fc_method": fc_method,
+        "fc_horizon": fc_horizon,
     }
 
 
-# ── Data quality panel ─────────────────────────────────────────────────────
-
-def render_data_quality(df: pd.DataFrame, file_reports: list[dict]) -> None:
-    """Show the data validation panel in an expander."""
+# ── Data quality panel ──────────────────────────────────────────────────────
+def _quality_panel(df: pd.DataFrame, file_reports: list[dict]) -> None:
     if df.empty:
         return
-
     validation = data_validator.validate_dataframe(df)
     score = validation["score"]
+    label = ("Excellent" if score >= 90 else "Good" if score >= 75 else "Fair" if score >= 60 else "Poor")
 
-    grade_class = (
-        "quality-excellent" if score >= 90 else
-        "quality-good" if score >= 75 else
-        "quality-fair" if score >= 60 else
-        "quality-poor"
-    )
-    grade_label = (
-        "Excellent" if score >= 90 else
-        "Good" if score >= 75 else
-        "Fair" if score >= 60 else
-        "Poor"
-    )
+    with st.expander(f"🔍 Data Quality — Score {score}/100 ({label})", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Quality Score", f"{score}/100")
+        c2.metric("Total Rows", f"{validation['total_rows']:,}")
+        c3.metric("Valid Rows", f"{validation['valid_rows']:,}")
 
-    with st.expander(f"🔍 Data Quality — Score: {score}/100 ({grade_label})", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Quality Score", f"{score}/100")
-        col2.metric("Total Rows", f"{validation['total_rows']:,}")
-        col3.metric("Valid Rows", f"{validation['valid_rows']:,}")
+        if validation.get("issues"):
+            st.dataframe(pd.DataFrame(validation["issues"]), use_container_width=True, hide_index=True)
 
-        if validation["issues"]:
-            issues_df = pd.DataFrame(validation["issues"])
-            st.dataframe(issues_df, use_container_width=True, hide_index=True)
-
-        # File ingestion summary
         if file_reports:
             st.subheader("Ingestion Report")
             rep_df = pd.DataFrame(file_reports)
-            cols_to_show = [c for c in ["file", "snapshot_date", "hotel", "status", "rows", "path", "error"] if c in rep_df.columns]
-            st.dataframe(rep_df[cols_to_show], use_container_width=True, hide_index=True)
+            cols = [c for c in ["file", "snapshot_date", "hotel", "status", "rows", "error"] if c in rep_df.columns]
+            st.dataframe(rep_df[cols], use_container_width=True, hide_index=True)
 
-            # Snapshot summary
-            valid_snaps = rep_df[rep_df.get("snapshot_date", pd.Series(dtype=str)).str.match(r'\d{4}-\d{2}-\d{2}', na=False)]
-            if not valid_snaps.empty:
-                st.caption(
-                    f"📅 **{valid_snaps['snapshot_date'].nunique()} distinct snapshot dates** "
-                    f"detected across {len(rep_df)} files."
-                )
-            else:
-                st.warning(
-                    "⚠️ **No snapshot dates parsed from folder names.**  \n"
-                    "Expected folder structure: `year / month / day / HotelName.xlsx`  \n"
-                    "e.g. `2026 / Januar / 15 / Aschaffenburg.xlsx`  \n"
-                    "The app fell back to file modification dates as snapshots."
-                )
+            if "snapshot_date" in rep_df.columns:
+                n_snaps = rep_df["snapshot_date"].dropna().nunique()
+                if n_snaps > 0:
+                    st.caption(f"📅 {n_snaps} distinct snapshot dates across {len(rep_df)} files.")
+                else:
+                    st.warning(
+                        "⚠️ No snapshot dates parsed from folder names.  \n"
+                        "Expected: `Year / Month / Day / HotelName.xlsx`  \n"
+                        "e.g. `2026 / Januar / 15 / Aschaffenburg.xlsx`  \n"
+                        "Fell back to file modification dates."
+                    )
 
-        # Export validation
-        val_bytes = exports.export_validation(validation)
-        st.download_button(
-            "⬇️ Download Validation Report",
-            data=val_bytes,
-            file_name="validation_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+        try:
+            val_bytes = exports.export_validation(validation)
+            st.download_button(
+                "⬇️ Download Validation Report", data=val_bytes,
+                file_name="validation_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            pass
 
 
-# ── Exports tab ────────────────────────────────────────────────────────────
-
-def render_exports_tab(df: pd.DataFrame, sel: dict) -> None:
+# ── Exports tab ─────────────────────────────────────────────────────────────
+def _exports_tab(df: pd.DataFrame, sel: dict) -> None:
     st.subheader("📥 Export Data")
-
     if df.empty:
-        st.warning("Load data first before exporting.")
+        st.warning("Load data first.")
         return
 
     hotel_df = df
     if sel["hotel"] and "hotel_name" in df.columns:
         hotel_df = df[df["hotel_name"] == sel["hotel"]]
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
+    c1, c2, c3 = st.columns(3)
+    with c1:
         st.markdown("**Master Dataset**")
-        st.download_button(
-            "⬇️ Download Excel",
-            data=exports.export_master(df),
-            file_name="master_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_master_xlsx",
-        )
-        st.download_button(
-            "⬇️ Download CSV",
-            data=exports.to_csv_bytes(df),
-            file_name="master_data.csv",
-            mime="text/csv",
-            key="dl_master_csv",
-        )
-
-    with col2:
-        st.markdown("**KPI Summary**")
-        monthly = kpi_engine.aggregate_period(df, "M")
+        st.download_button("⬇️ Excel", data=exports.export_master(df),
+                           file_name="master_data.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_master")
+        st.download_button("⬇️ CSV", data=exports.to_csv_bytes(df),
+                           file_name="master_data.csv", mime="text/csv", key="dl_csv")
+    with c2:
+        st.markdown("**Monthly KPIs**")
+        monthly = kpi_engine.aggregate_period(df, "Monthly")
         if not monthly.empty:
-            st.download_button(
-                "⬇️ Monthly KPI Excel",
-                data=exports.export_kpi_summary(monthly),
-                file_name="kpi_monthly.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_kpi",
-            )
-
-    with col3:
+            st.download_button("⬇️ Monthly KPI Excel", data=exports.export_kpi_summary(monthly),
+                               file_name="kpi_monthly.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_kpi")
+    with c3:
         st.markdown("**Validation Report**")
-        validation = data_validator.validate_dataframe(df)
-        st.download_button(
-            "⬇️ Validation Excel",
-            data=exports.export_validation(validation),
-            file_name="validation_report.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="dl_val",
-        )
+        v = data_validator.validate_dataframe(df)
+        st.download_button("⬇️ Validation Excel", data=exports.export_validation(v),
+                           file_name="validation_report.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_val")
 
     st.markdown("---")
-
-    col4, col5 = st.columns(2)
-    with col4:
+    c4, c5 = st.columns(2)
+    with c4:
         st.markdown("**Anomaly Report**")
-        from modules.anomaly_detection import detect_anomalies, anomaly_summary
-        flagged = detect_anomalies(hotel_df)
-        anom_df = anomaly_summary(flagged)
-        if not anom_df.empty:
-            st.download_button(
-                "⬇️ Anomaly Report Excel",
-                data=exports.export_anomalies(anom_df),
-                file_name="anomaly_report.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="dl_anom",
-            )
-        else:
-            st.info("No anomalies to export.")
+        try:
+            from modules.anomaly_detection import detect_anomalies, anomaly_summary
+            flagged = detect_anomalies(hotel_df)
+            anom_df = anomaly_summary(flagged)
+            if not anom_df.empty:
+                st.download_button("⬇️ Anomaly Report", data=exports.export_anomalies(anom_df),
+                                   file_name="anomaly_report.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key="dl_anom")
+            else:
+                st.info("No anomalies detected.")
+        except Exception as e:
+            st.warning(f"Anomaly export failed: {e}")
 
-    with col5:
+    with c5:
         st.markdown("**Forecast Export**")
-        from modules.forecasting import run_forecast
-        fcast_metric = [m for m in ["revpar", "revenue"] if m in hotel_df.columns]
-        if fcast_metric:
-            with st.spinner("Generating forecast for export…"):
-                fcast_df = run_forecast(
-                    hotel_df,
-                    method=sel["forecast_method"],
-                    metric=fcast_metric[0],
-                    horizon=sel["forecast_horizon"],
-                )
-            if fcast_df is not None:
-                st.download_button(
-                    "⬇️ Forecast Excel",
-                    data=exports.export_forecast(fcast_df),
-                    file_name="forecast.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="dl_fcast",
-                )
-        else:
-            st.info("No forecastable metrics found.")
+        try:
+            from modules.forecasting import run_forecast
+            fcast_metric = next((m for m in ["revpar", "revenue"] if m in hotel_df.columns), None)
+            if fcast_metric:
+                with st.spinner("Generating forecast…"):
+                    fcast_df = run_forecast(hotel_df, method=sel["fc_method"],
+                                            metric=fcast_metric, horizon=sel["fc_horizon"])
+                if fcast_df is not None:
+                    st.download_button("⬇️ Forecast Excel", data=exports.export_forecast(fcast_df),
+                                       file_name="forecast.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       key="dl_fcast")
+        except Exception as e:
+            st.warning(f"Forecast export failed: {e}")
 
 
-# ── Demo data generator ────────────────────────────────────────────────────
-
-def _generate_demo_data() -> pd.DataFrame:
-    """Generate synthetic hotel data for demonstration."""
-    rng = np.random.default_rng(42)
-    hotels = [
-        "Grand Hyatt Downtown", "Marriott Airport", "Hilton Garden Inn",
-        "Sheraton Midtown", "Courtyard by Marriott", "Holiday Inn Express",
-        "Radisson Blu", "Best Western Plus", "DoubleTree Resort",
-        "Wyndham Grand", "Four Points by Sheraton", "Hampton Inn",
-        "Comfort Suites", "Embassy Suites",
-    ]
-    dates = pd.date_range("2023-01-01", periods=365, freq="D")
-    rows = []
-    for hotel in hotels:
-        capacity = rng.integers(80, 300)
-        base_occ = rng.uniform(0.55, 0.85)
-        base_adr = rng.uniform(80, 350)
-        for d in dates:
-            dow_effect = 1.15 if d.dayofweek >= 4 else 1.0
-            seasonality = 1 + 0.2 * np.sin(2 * np.pi * d.dayofyear / 365)
-            noise = rng.normal(1.0, 0.05)
-            occ = min(base_occ * dow_effect * seasonality * noise, 0.99)
-            rooms_sold = int(capacity * occ)
-            adr = base_adr * dow_effect * (0.9 + 0.2 * rng.random())
-            revenue = rooms_sold * adr
-            rows.append({
-                "date": d,
-                "hotel_name": hotel,
-                "rooms_sold": rooms_sold,
-                "rooms_available": capacity,
-                "revenue": round(revenue, 2),
-                "adr": round(adr, 2),
-                "occupancy_pct": round(occ * 100, 2),
-                "revpar": round(revenue / capacity, 2),
-            })
-    return pd.DataFrame(rows)
-
-
-# ── Main ────────────────────────────────────────────────────────────────────
-
+# ── Main ─────────────────────────────────────────────────────────────────────
 def main() -> None:
-    render_header()
+    _header()
 
-    # ── Session state ──────────────────────────────────────────────────────
-    if "df" not in st.session_state:
-        st.session_state["df"] = pd.DataFrame()
-    if "file_reports" not in st.session_state:
-        st.session_state["file_reports"] = []
-    if "demo_loaded" not in st.session_state:
-        st.session_state["demo_loaded"] = False
-    if "auto_load_done" not in st.session_state:
-        st.session_state["auto_load_done"] = False
+    # Session state init
+    for key, default in [("df", pd.DataFrame()), ("file_reports", []),
+                          ("auto_load_done", False), ("last_folder", "")]:
+        if key not in st.session_state:
+            st.session_state[key] = default
 
     df: pd.DataFrame = st.session_state["df"]
-    file_reports: list[dict] = st.session_state["file_reports"]
 
-    # ── Sidebar controls ───────────────────────────────────────────────────
-    sel = render_sidebar(df)
+    # Sidebar (uses current df for hotel list / date range / snapshot info)
+    sel = _sidebar(df)
 
-    # ── Auto-load from DEFAULT_DATA_FOLDER on first startup ───────────────
+    # ── Auto-load on first startup ─────────────────────────────────────────
     if not st.session_state["auto_load_done"] and df.empty:
         auto_folder = (DEFAULT_DATA_FOLDER or "").strip()
         if auto_folder and Path(auto_folder).exists():
-            # Try loading from cache first
-            is_valid, reason = cache_manager.cache_is_valid(auto_folder)
-            if is_valid:
-                with st.spinner("Loading from cache…"):
-                    cached_df, cached_meta = cache_manager.load_cache()
-                    if cached_df is not None:
-                        st.session_state["df"] = cached_df
-                        st.session_state["file_reports"] = []
+            with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
+                try:
+                    new_df, reports, source = _load_from_cache_or_scan(auto_folder)
+                    if not new_df.empty:
+                        st.session_state["df"] = new_df
+                        st.session_state["file_reports"] = reports
                         st.session_state["last_folder"] = auto_folder
-                        st.session_state["demo_loaded"] = True
-                        df = cached_df
-                        logger.info("Auto-loaded %d rows from cache", len(cached_df))
-            else:
-                logger.info("Cache invalid (%s) — scanning files", reason)
-                with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
-                    try:
-                        new_df, new_reports = load_data(auto_folder)
-                        if not new_df.empty:
-                            new_df = data_cleaner.clean(new_df)
-                            cache_manager.save_cache(new_df, auto_folder, new_reports)
-                            st.session_state["df"] = new_df
-                            st.session_state["file_reports"] = new_reports
-                            st.session_state["last_folder"] = auto_folder
-                            st.session_state["demo_loaded"] = True
-                            df = new_df
-                            file_reports = new_reports
-                            logger.info("Auto-loaded %d rows from folder", len(new_df))
-                    except Exception as e:
-                        logger.error("Auto-load failed: %s", e)
+                        df = new_df
+                        logger.info("Auto-loaded %d rows (%s)", len(new_df), source)
+                except Exception as e:
+                    logger.error("Auto-load failed: %s", e)
         st.session_state["auto_load_done"] = True
 
-    # ── Load demo data only if no real data and no default folder ─────────
-    if not st.session_state["demo_loaded"] and df.empty and not sel["folder"].strip():
-        with st.spinner("Loading demo data (14 hotels, 365 days each)…"):
-            demo_df = _generate_demo_data()
-            demo_df = data_cleaner.clean(demo_df)
-            st.session_state["df"] = demo_df
-            st.session_state["file_reports"] = [{"file": "demo_data", "status": "ok", "rows": len(demo_df)}]
-            st.session_state["demo_loaded"] = True
-            df = demo_df
-        st.info(
-            "📌 **Demo Mode** — Showing synthetic data for 14 hotels. "
-            "Enter your root data folder path in the sidebar and click **Load / Refresh Data** to use your own files."
-        )
-
-    # ── User-triggered data load ───────────────────────────────────────────
-    trigger_load = sel["load"] or sel.get("force_refresh")
-    if trigger_load:
+    # ── User-triggered load ─────────────────────────────────────────────────
+    if sel["load"] or sel["force"]:
         folder = sel["folder"].strip()
         if not folder:
-            st.sidebar.warning("Please enter a folder path first.")
+            st.sidebar.warning("Enter a folder path first.")
         elif not Path(folder).exists():
-            st.sidebar.error(
-                f"Folder not found:\n`{folder}`\n\n"
-                "Please enter an absolute path to your data root folder."
-            )
+            st.sidebar.error(f"Folder not found: `{folder}`")
         else:
             st.session_state["last_folder"] = folder
-            force = sel.get("force_refresh", False)
-
-            # Use cache if valid and not force-refreshing
-            if not force:
-                is_valid, reason = cache_manager.cache_is_valid(folder)
-            else:
-                is_valid, reason = False, "Force refresh requested"
-
-            if is_valid:
-                with st.spinner("Loading from cache…"):
-                    cached_df, cached_meta = cache_manager.load_cache()
-                    if cached_df is not None:
-                        st.session_state["df"] = cached_df
-                        st.session_state["file_reports"] = []
-                        st.session_state["demo_loaded"] = True
-                        df = cached_df
-                        st.sidebar.success(f"✅ Loaded {len(cached_df):,} rows from cache.")
-            else:
-                prog = st.progress(0, text="Scanning folder structure…")
+            with st.spinner("Loading data…"):
                 try:
-                    new_df, new_reports = load_data(folder)
-                    prog.progress(1.0, text="Processing complete.")
-                    if new_df.empty:
-                        st.sidebar.warning("No readable hotel files found. Check the folder path and file formats (.xlsx/.xls/.csv).")
-                    else:
-                        cache_manager.save_cache(new_df, folder, new_reports)
-                        st.session_state["df"] = new_df
-                        st.session_state["file_reports"] = new_reports
-                        st.session_state["demo_loaded"] = True
-                        df = new_df
-                        file_reports = new_reports
-                        st.sidebar.success(f"✅ Loaded {len(new_df):,} rows from {len(new_reports)} files. Cache saved.")
-                except Exception as e:
-                    logger.error("Load failed: %s\n%s", e, traceback.format_exc())
-                    st.sidebar.error(f"Load error: {e}")
-                finally:
+                    prog = st.progress(0, text="Scanning…")
+                    new_df, reports, source = _load_from_cache_or_scan(folder, force=sel["force"])
+                    prog.progress(1.0, text="Done.")
                     prog.empty()
+                    if new_df.empty:
+                        st.sidebar.warning("No hotel files found. Check path and file formats.")
+                    else:
+                        st.session_state["df"] = new_df
+                        st.session_state["file_reports"] = reports
+                        df = new_df
+                        st.session_state["file_reports"] = reports
+                        snaps = kpi_engine.get_snapshots(new_df)
+                        st.sidebar.success(
+                            f"✅ {len(new_df):,} rows · {len(snaps)} snapshots  "
+                            f"({'cache' if source == 'cache' else f'{len(reports)} files'})"
+                        )
+                        st.rerun()
+                except Exception as e:
+                    logger.error("Load error: %s\n%s", e, traceback.format_exc())
+                    st.sidebar.error(f"Load error: {e}")
 
     df = st.session_state["df"]
     file_reports = st.session_state["file_reports"]
 
-    # ── No data state ──────────────────────────────────────────────────────
+    # ── Empty state ────────────────────────────────────────────────────────
     if df.empty:
         st.markdown(
-            """<div style='text-align:center;padding:60px;'>
-              <h2>🏨 Welcome to the Revenue Management Platform</h2>
-              <p style='color:#94A3B8'>Enter the path to your hotel data folder in the sidebar and click <b>Load / Refresh Data</b>.</p>
-              <p style='color:#94A3B8'>Supported formats: <b>.xlsx · .xls · .csv</b></p>
-            </div>""",
+            "<div style='text-align:center;padding:80px;'>"
+            "<h2 style='color:#60a5fa;'>🏨 Welcome to the Revenue Management Platform</h2>"
+            "<p style='color:#94a3b8;font-size:1rem;'>Enter the path to your root data folder in the sidebar "
+            "and click <b>Load / Refresh Data</b>.</p>"
+            "<p style='color:#64748b;'>Supported formats: <b>.xlsx · .xls · .csv</b></p>"
+            "<p style='color:#64748b;font-size:0.85rem;'>Expected folder structure:<br>"
+            "<code>Root / 2026 / Januar / 15 / Aschaffenburg.xlsx</code></p>"
+            "</div>",
             unsafe_allow_html=True,
         )
         return
 
     # ── Date filter ────────────────────────────────────────────────────────
-    filtered_df = df.copy()
-    if sel["date_min"] and sel["date_max"] and "date" in filtered_df.columns:
-        start = pd.Timestamp(sel["date_min"])
-        end = pd.Timestamp(sel["date_max"])
-        filtered_df = filtered_df[(filtered_df["date"] >= start) & (filtered_df["date"] <= end)]
+    filtered = df.copy()
+    if sel["date_min"] and sel["date_max"] and "date" in filtered.columns:
+        filtered = filtered[
+            (filtered["date"] >= pd.Timestamp(sel["date_min"])) &
+            (filtered["date"] <= pd.Timestamp(sel["date_max"]))
+        ]
 
-    # ── Data quality banner ────────────────────────────────────────────────
-    render_data_quality(filtered_df, file_reports)
+    # ── Data quality panel ─────────────────────────────────────────────────
+    _quality_panel(filtered, file_reports)
 
-    # ── Render mode ────────────────────────────────────────────────────────
+    # ── Dashboard routing ──────────────────────────────────────────────────
     try:
         if sel["mode"] == "Hotel Level":
-            if sel["hotel"]:
-                hotel_dashboard.render(
-                    filtered_df,
-                    hotel=sel["hotel"],
-                    forecast_method=sel["forecast_method"],
-                    forecast_horizon=sel["forecast_horizon"],
-                )
-            else:
-                st.warning("Please select a hotel from the sidebar.")
+            if not sel["hotel"]:
+                st.warning("Select a hotel from the sidebar.")
+                return
+            hotel_dashboard.render(
+                filtered,
+                hotel=sel["hotel"],
+                fc_method=sel["fc_method"],
+                fc_horizon=sel["fc_horizon"],
+            )
         else:
-            # Portfolio tabs including Exports
-            ptabs = st.tabs([
-                "📊 Portfolio", "📥 Exports"
-            ])
-            with ptabs[0]:
+            tabs = st.tabs(["📊 Portfolio Dashboard", "📥 Exports"])
+            with tabs[0]:
                 portfolio_dashboard.render(
-                    filtered_df,
-                    forecast_method=sel["forecast_method"],
-                    forecast_horizon=sel["forecast_horizon"],
+                    filtered,
+                    fc_method=sel["fc_method"],
+                    fc_horizon=sel["fc_horizon"],
                 )
-            with ptabs[1]:
-                render_exports_tab(filtered_df, sel)
+            with tabs[1]:
+                _exports_tab(filtered, sel)
 
     except Exception as e:
-        logger.error("Dashboard render error: %s\n%s", e, traceback.format_exc())
+        logger.error("Render error: %s\n%s", e, traceback.format_exc())
         st.error(
-            f"An error occurred while rendering the dashboard.\n\n"
-            f"**Details:** `{e}`\n\n"
-            "Check the logs for a full traceback."
+            f"Dashboard render error: `{e}`\n\n"
+            "Check the log file for a full traceback."
         )
 
 
