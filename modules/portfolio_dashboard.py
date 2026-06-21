@@ -42,29 +42,28 @@ def _safe(v, default=0.0):
         return default
 
 
-def _metric_block(label: str, closed_val, open_val, fmt: str, col) -> None:
-    """Render one KPI with Closed / Open split inside a card."""
-    closed_str = fmt.format(closed_val)
-    open_str   = fmt.format(open_val)
+def _metric_block(label: str, closed_val, open_val, total_val, fmt: str, col) -> None:
+    """Render one KPI card with Closed / Open / Combined."""
     col.markdown(
         f"""<div style='background:linear-gradient(135deg,#1a2744,#0d1b2a);
             border-radius:10px;padding:14px 16px;text-align:center;
             border:1px solid rgba(255,255,255,0.08);'>
-          <p style='margin:0 0 6px;font-size:11px;color:#94a3b8;letter-spacing:1px;
+          <p style='margin:0 0 4px;font-size:11px;color:#94a3b8;letter-spacing:1px;
                     text-transform:uppercase'>{label}</p>
-          <div style='display:flex;justify-content:space-around;gap:6px;'>
+          <p style='margin:0 0 8px;font-size:21px;font-weight:800;color:#f1f5f9'>
+            {fmt.format(total_val)}</p>
+          <div style='display:flex;justify-content:space-around;
+                      border-top:1px solid rgba(255,255,255,0.07);padding-top:8px;'>
             <div>
-              <p style='margin:0;font-size:9px;color:#64748b;text-transform:uppercase'>
-                ✅ Closed</p>
-              <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#34d399'>
-                {closed_str}</p>
+              <p style='margin:0;font-size:9px;color:#64748b'>✅ Closed</p>
+              <p style='margin:2px 0 0;font-size:14px;font-weight:700;color:#34d399'>
+                {fmt.format(closed_val)}</p>
             </div>
-            <div style='border-left:1px solid rgba(255,255,255,0.1)'></div>
+            <div style='border-left:1px solid rgba(255,255,255,0.08)'></div>
             <div>
-              <p style='margin:0;font-size:9px;color:#64748b;text-transform:uppercase'>
-                📋 Open</p>
-              <p style='margin:2px 0 0;font-size:17px;font-weight:700;color:#60a5fa'>
-                {open_str}</p>
+              <p style='margin:0;font-size:9px;color:#64748b'>📋 Open</p>
+              <p style='margin:2px 0 0;font-size:14px;font-weight:700;color:#60a5fa'>
+                {fmt.format(open_val)}</p>
             </div>
           </div>
         </div>""",
@@ -88,12 +87,15 @@ def _kpi_row(df: pd.DataFrame) -> None:
         unsafe_allow_html=True,
     )
 
+    # Combined = re-derived from total sums (never average rate metrics)
+    t = kpi_engine._kpis_from_df(df)
+
     cols = st.columns(5)
-    _metric_block("Occupancy %",  c["occupancy_pct"], o["occupancy_pct"], "{:.1f}%",   cols[0])
-    _metric_block("ADR",          c["adr"],           o["adr"],           "€{:,.2f}",  cols[1])
-    _metric_block("RevPAR",       c["revpar"],        o["revpar"],        "€{:,.2f}",  cols[2])
-    _metric_block("Revenue",      c["revenue"],       o["revenue"],       "€{:,.0f}",  cols[3])
-    _metric_block("Rooms Sold",   c["rooms_sold"],    o["rooms_sold"],    "{:,.0f}",   cols[4])
+    _metric_block("Occupancy %", c["occupancy_pct"], o["occupancy_pct"], t["occupancy_pct"], "{:.1f}%",  cols[0])
+    _metric_block("ADR",         c["adr"],           o["adr"],           t["adr"],           "€{:,.2f}", cols[1])
+    _metric_block("RevPAR",      c["revpar"],        o["revpar"],        t["revpar"],        "€{:,.2f}", cols[2])
+    _metric_block("Revenue",     c["revenue"],       o["revenue"],       t["revenue"],       "€{:,.0f}", cols[3])
+    _metric_block("Rooms Sold",  c["rooms_sold"],    o["rooms_sold"],    t["rooms_sold"],    "{:,.0f}",  cols[4])
 
     # Hotels count — single value
     st.markdown(
