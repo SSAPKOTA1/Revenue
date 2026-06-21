@@ -151,6 +151,31 @@ def snapshot_view(df: pd.DataFrame, snap: pd.Timestamp) -> pd.DataFrame:
     return df2[df2["snapshot_date"] == snap].copy()
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def best_view(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each (hotel_name, date) pick the row from the LATEST snapshot
+    that contains that arrival date.
+
+    This gives the most accurate picture of each day:
+      - Future dates  → latest on-books position (from most recent snapshot)
+      - Past dates    → final on-books (from the last snapshot that covered them)
+
+    Use this for Year-over-Year and historical analysis instead of
+    latest_snapshot_view(), which only returns dates in the newest file.
+    """
+    if df.empty:
+        return df
+    df2 = df.copy()
+    df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
+    df2["date"]          = pd.to_datetime(df2["date"],          errors="coerce")
+    df2 = df2.dropna(subset=["snapshot_date", "date"])
+
+    # Keep the row with the latest snapshot for each (hotel, arrival_date)
+    idx = df2.groupby(["hotel_name", "date"])["snapshot_date"].transform("max")
+    return df2[df2["snapshot_date"] == idx].copy()
+
+
 def rolling_kpis(df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
     df = df.sort_values("date").copy()
     for col in ["occupancy_pct", "adr", "revpar", "revenue"]:
