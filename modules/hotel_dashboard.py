@@ -273,6 +273,51 @@ def tab_performance(df: pd.DataFrame) -> None:
                 st.plotly_chart(fig, use_container_width=True)
 
 
+# ── Snapshot diagnostics ─────────────────────────────────────────────────────
+
+def _snapshot_status(df: pd.DataFrame) -> tuple[bool, list]:
+    """
+    Returns (has_snapshots, sorted_snapshot_list).
+    A DataFrame has meaningful snapshots only if there are ≥ 2 distinct dates.
+    """
+    if "snapshot_date" not in df.columns:
+        return False, []
+    snaps = sorted(pd.to_datetime(df["snapshot_date"], errors="coerce").dropna().unique())
+    return len(snaps) >= 2, snaps
+
+
+def _render_snapshot_info(df: pd.DataFrame) -> tuple[bool, list]:
+    """Show a compact snapshot status badge and return (has_snapshots, snaps)."""
+    has_snaps, snaps = _snapshot_status(df)
+
+    if has_snaps:
+        first = pd.Timestamp(snaps[0]).strftime("%d %b %Y")
+        last  = pd.Timestamp(snaps[-1]).strftime("%d %b %Y")
+        st.success(
+            f"✅ **{len(snaps)} snapshots detected** — from {first} to {last}. "
+            f"Each snapshot = one day-folder export of the 365-day occupancy picture."
+        )
+    else:
+        n = len(snaps)
+        if n == 0:
+            st.error(
+                "⚠️ **No snapshot dates found.**  \n"
+                "The app reads the snapshot date from your folder structure "
+                "(`year / month / day / hotel.xlsx`).  \n"
+                "Check the **Data Quality** panel → Ingestion Report to see what "
+                "snapshot_date was detected for each file.  \n"
+                "If the folder names don't contain a recognisable date the app "
+                "falls back to the file's last-modified date."
+            )
+        else:
+            st.warning(
+                f"⚠️ **Only 1 snapshot detected** ({pd.Timestamp(snaps[0]).strftime('%d %b %Y')}).  \n"
+                "Pickup and Pace need ≥ 2 snapshots to show change over time.  \n"
+                "Make sure you have data from at least two different day-folders."
+            )
+    return has_snaps, snaps
+
+
 # ── Tab: Pickup ──────────────────────────────────────────────────────────────
 
 def tab_pickup(df: pd.DataFrame) -> None:
@@ -288,12 +333,12 @@ def tab_pickup(df: pd.DataFrame) -> None:
         "between the current booking position and a past snapshot."
     )
 
+    has_snapshots, all_snaps_raw = _render_snapshot_info(df)
+
     available_metrics = [m for m in ["rooms_sold", "revenue", "adr", "occupancy_pct"] if m in df.columns]
     if not available_metrics:
         st.info("No pickup metrics found in data.")
         return
-
-    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
 
     # ── Controls row ────────────────────────────────────────────────────────
     c1, c2, c3 = st.columns([2, 2, 2])
@@ -330,12 +375,8 @@ def tab_pickup(df: pd.DataFrame) -> None:
     df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
     df2 = df2.dropna(subset=["snapshot_date", "date"])
 
-    all_snaps = sorted(df2["snapshot_date"].dropna().unique())
-    if len(all_snaps) < 2:
-        st.info("Need at least 2 snapshot dates to compute pickup.")
-        return
-
-    latest_snap = pd.Timestamp(all_snaps[-1])
+    all_snaps = [pd.Timestamp(s) for s in all_snaps_raw]
+    latest_snap = all_snaps[-1]
 
     # Preset options mapped to number of days back
     preset_options = {
@@ -510,7 +551,7 @@ def tab_pace(df: pd.DataFrame) -> None:
         "evolved over time as bookings accumulated."
     )
 
-    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
+    has_snapshots, _ = _render_snapshot_info(df)
     metrics = [m for m in ["rooms_sold", "occupancy_pct", "revenue", "adr"] if m in df.columns]
 
     if not metrics:
@@ -518,11 +559,6 @@ def tab_pace(df: pd.DataFrame) -> None:
         return
 
     if not has_snapshots:
-        st.info(
-            "Pace analysis requires multiple snapshot dates. "
-            "Organise your data files in day-folders so each folder date "
-            "becomes a booking snapshot."
-        )
         return
 
     df2 = df.copy()

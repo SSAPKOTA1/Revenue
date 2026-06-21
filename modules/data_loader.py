@@ -437,52 +437,65 @@ def _extract_snapshot_date(filepath: Path, root: Path) -> Optional[pd.Timestamp]
     """
     Derive the snapshot date from the folder structure.
 
-    Expected layouts (any depth, any order):
-        root / <year> / <month_name_or_num> / <day> / file.xlsx
-        root / <month_name> / <day> / file.xlsx   (year in root path)
+    Strategy (in order):
+    1. Scan ALL path parts for year (2000-2099), month (name or number),
+       and day (1-31). Works regardless of depth or folder naming style.
+    2. The parent folder chain between root and the file is preferred;
+       the full path is also searched as fallback for the year.
+    3. If all three components are found, return the date.
+    4. If parsing fails, fall back to the file's modification time.
 
-    Year is searched across ALL path parts (including above root).
-    Month and day are searched in the parts BETWEEN root and file.
+    Supports layouts like:
+        root / 2026 / Januar / 01 / file.xlsx
+        root / Januar / 01 / file.xlsx   (year in path above root)
+        root / 2026 / 01 / 15 / file.xlsx
+        root / January / 15 / file.xlsx
     """
-    all_parts  = list(filepath.parts)            # full absolute path parts
-    try:
-        root_idx = all_parts.index(root.parts[-1])
-    except ValueError:
-        root_idx = 0
-    sub_parts  = all_parts[root_idx:]            # from root downward
+    def _try_int(s: str) -> Optional[int]:
+        digits = re.sub(r'[^0-9]', '', s)
+        return int(digits) if digits else None
+
+    all_parts = list(filepath.parts)   # complete absolute path
+
+    # ── Find root position ──────────────────────────────────────────────────
+    # Use the last N parts of root to find it in the full path (handles
+    # cases where root name appears multiple times)
+    root_parts = list(root.parts)
+    root_idx = 0
+    for i in range(len(all_parts) - len(root_parts), -1, -1):
+        if all_parts[i:i + len(root_parts)] == root_parts:
+            root_idx = i
+            break
+
+    # Sub-parts: from root directory down to (but not including) the file
+    sub_parts = all_parts[root_idx: len(all_parts) - 1]  # exclude filename
 
     year = month = day = None
 
-    # --- scan sub-parts first, then full path for year ---
-    def _try_int(s: str) -> Optional[int]:
-        try:
-            return int(re.sub(r'[^0-9]', '', s)) if re.sub(r'[^0-9]', '', s) else None
-        except ValueError:
-            return None
-
+    # ── Pass 1: scan sub-parts for all three components ────────────────────
     for part in sub_parts:
         p = part.strip().lower()
         n = _try_int(p)
 
-        # Year: 4-digit number 2000-2099
+        # Year: 4-digit 2000-2099
         if n and 2000 <= n <= 2099 and year is None:
             year = n
             continue
 
-        # Month name
+        # Month by name (English + German)
         if p in _MONTH_NAMES and month is None:
             month = _MONTH_NAMES[p]
             continue
 
-        # Numeric month or day (1–31)
+        # Pure numeric: interpret as month (if ≤ 12 and month unknown) else day
         if n and 1 <= n <= 31:
             if month is None and n <= 12:
                 month = n
-            elif day is None:
+            elif day is None and n <= 31:
                 day = n
             continue
 
-    # Fallback: scan all path parts for a 4-digit year if not found yet
+    # ── Pass 2: scan FULL path for year if still missing ───────────────────
     if year is None:
         for part in all_parts:
             n = _try_int(part)
@@ -490,11 +503,23 @@ def _extract_snapshot_date(filepath: Path, root: Path) -> Optional[pd.Timestamp]
                 year = n
                 break
 
-    if year is None or month is None or day is None:
-        return None
+    # ── Construct date ──────────────────────────────────────────────────────
+    if year and month and day:
+        try:
+            return pd.Timestamp(year=year, month=month, day=day)
+        except Exception:
+            pass
 
+    # ── Fallback: use file modification time ────────────────────────────────
     try:
-        return pd.Timestamp(year=year, month=month, day=day)
+        mtime = filepath.stat().st_mtime
+        ts = pd.Timestamp.fromtimestamp(mtime).normalize()  # midnight of that day
+        logger.debug(
+            "Snapshot date from mtime for '%s': %s (folder parse failed: "
+            "year=%s month=%s day=%s)",
+            filepath.name, ts.date(), year, month, day,
+        )
+        return ts
     except Exception:
         return None
 

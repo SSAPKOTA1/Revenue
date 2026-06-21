@@ -237,8 +237,23 @@ def render_data_quality(df: pd.DataFrame, file_reports: list[dict]) -> None:
         if file_reports:
             st.subheader("Ingestion Report")
             rep_df = pd.DataFrame(file_reports)
-            cols_to_show = [c for c in ["file", "path", "hotel", "status", "rows", "error"] if c in rep_df.columns]
+            cols_to_show = [c for c in ["file", "snapshot_date", "hotel", "status", "rows", "path", "error"] if c in rep_df.columns]
             st.dataframe(rep_df[cols_to_show], use_container_width=True, hide_index=True)
+
+            # Snapshot summary
+            valid_snaps = rep_df[rep_df.get("snapshot_date", pd.Series(dtype=str)).str.match(r'\d{4}-\d{2}-\d{2}', na=False)]
+            if not valid_snaps.empty:
+                st.caption(
+                    f"📅 **{valid_snaps['snapshot_date'].nunique()} distinct snapshot dates** "
+                    f"detected across {len(rep_df)} files."
+                )
+            else:
+                st.warning(
+                    "⚠️ **No snapshot dates parsed from folder names.**  \n"
+                    "Expected folder structure: `year / month / day / HotelName.xlsx`  \n"
+                    "e.g. `2026 / Januar / 15 / Aschaffenburg.xlsx`  \n"
+                    "The app fell back to file modification dates as snapshots."
+                )
 
         # Export validation
         val_bytes = exports.export_validation(validation)
