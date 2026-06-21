@@ -217,22 +217,94 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
 
 def tab_pickup(df: pd.DataFrame) -> None:
     """
-    Pickup = (on-books in latest snapshot) - (on-books in comparison snapshot)
-    for the same arrival dates.
+    Pickup = (on-books at latest snapshot) − (on-books at chosen past snapshot)
+    for the same future arrival dates.
     """
-    st.caption(
-        "Pickup shows how many rooms/revenue were gained or lost between "
-        "the latest snapshot and a chosen past snapshot, for the same future arrival dates."
-    )
-
     snaps = _snap_banner(df)
     if len(snaps) < 2:
         return
 
-    # ── Controls ─────────────────────────────────────────────────────────────
+    latest_snap = snaps[-1]
+    earliest_snap = snaps[0]
+
+    df2 = df.copy()
+    df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
+    df2["date"]          = pd.to_datetime(df2["date"],          errors="coerce")
+    df2 = df2.dropna(subset=["snapshot_date", "date"])
+
+    # ── Section 1: Snapshot date picker ──────────────────────────────────────
+    st.markdown("#### 📅 Choose comparison snapshot date")
+    st.caption(
+        "The app compares what is on-books **today** (latest snapshot) "
+        "versus what was on-books on the date you pick below."
+    )
+
+    col_date, col_quick = st.columns([2, 3])
+
+    with col_date:
+        comp_date_input = st.date_input(
+            "Comparison snapshot date",
+            value=max(
+                pd.Timestamp(latest_snap - pd.Timedelta(days=7)).date(),
+                pd.Timestamp(earliest_snap).date(),
+            ),
+            min_value=pd.Timestamp(earliest_snap).date(),
+            max_value=pd.Timestamp(snaps[-2]).date(),
+            key="pu_comp_date",
+        )
+        target = pd.Timestamp(comp_date_input)
+
+    with col_quick:
+        st.markdown("**Quick presets** (click to jump):")
+        preset_cols = st.columns(5)
+        presets = [("−7d", 7), ("−14d", 14), ("−30d", 30), ("−60d", 60), ("−90d", 90)]
+        for i, (label, days) in enumerate(presets):
+            t = latest_snap - pd.Timedelta(days=days)
+            if t >= earliest_snap:
+                if preset_cols[i].button(label, key=f"pu_preset_{days}"):
+                    target = t
+
+    # Snap to nearest available snapshot
+    diffs = [abs((s - target).days) for s in snaps[:-1]]
+    comp_snap = snaps[diffs.index(min(diffs))]
+    delta_days = (latest_snap - comp_snap).days
+
+    st.markdown(
+        f"<div style='background:#162032;border-radius:8px;padding:10px 16px;"
+        f"margin:8px 0;font-size:0.9rem;'>"
+        f"🗓️ <b>Comparing</b>: "
+        f"<span style='color:#60a5fa'>{comp_snap.strftime('%d %b %Y')}</span> "
+        f"→ "
+        f"<span style='color:#34d399'>{latest_snap.strftime('%d %b %Y')}</span> "
+        f"&nbsp;·&nbsp; <b>Δ {delta_days} days</b>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("---")
+
+    # ── Section 2: Arrival date filter ───────────────────────────────────────
+    st.markdown("#### 🛎️ Filter arrival dates (optional)")
+    all_arrival_dates = sorted(df2["date"].dropna().unique())
+    arr_min = pd.Timestamp(all_arrival_dates[0]).date()
+    arr_max = pd.Timestamp(all_arrival_dates[-1]).date()
+
+    arr_filter = st.date_input(
+        "Show pickup for arrivals between",
+        value=(arr_min, arr_max),
+        min_value=arr_min,
+        max_value=arr_max,
+        key="pu_arr_filter",
+    )
+    if isinstance(arr_filter, (list, tuple)) and len(arr_filter) == 2:
+        arr_from, arr_to = pd.Timestamp(arr_filter[0]), pd.Timestamp(arr_filter[1])
+    else:
+        arr_from = arr_to = pd.Timestamp(arr_filter[0])
+
+    # ── Section 3: Metric & grouping ─────────────────────────────────────────
     available_metrics = [m for m in ["rooms_sold", "revenue", "occupancy_pct", "adr"]
-                         if m in df.columns]
-    c1, c2, c3 = st.columns(3)
+                         if m in df2.columns]
+    c1, c2 = st.columns(2)
     with c1:
         metric = st.selectbox("Metric", available_metrics, key="pu_metric")
     with c2:
@@ -241,75 +313,65 @@ def tab_pickup(df: pd.DataFrame) -> None:
             ["Monthly", "Weekly", "Daily", "Yearly"],
             key="pu_groupby",
         )
-    with c3:
-        preset_map = {
-            "1 week ago (7 days)": 7,
-            "2 weeks ago (14 days)": 14,
-            "1 month ago (30 days)": 30,
-            "2 months ago (60 days)": 60,
-            "3 months ago (90 days)": 90,
-            "1 day ago": 1,
-            "3 days ago": 3,
-            "Custom date": -1,
-        }
-        preset = st.selectbox("Compare latest vs.", list(preset_map.keys()), key="pu_preset")
 
-    latest_snap = snaps[-1]
-
-    if preset_map[preset] == -1:
-        custom = st.date_input(
-            "Comparison snapshot date",
-            value=pd.Timestamp(snaps[0]).date(),
-            min_value=pd.Timestamp(snaps[0]).date(),
-            max_value=pd.Timestamp(snaps[-2]).date(),
-            key="pu_custom",
-        )
-        target = pd.Timestamp(custom)
-    else:
-        target = latest_snap - pd.Timedelta(days=preset_map[preset])
-
-    # Find closest available snapshot to target
-    diffs = [abs((s - target).days) for s in snaps[:-1]]
-    comp_snap = snaps[diffs.index(min(diffs))]
-
-    delta_days = (latest_snap - comp_snap).days
-    st.markdown(
-        f"**Latest:** `{latest_snap.strftime('%d %b %Y')}` &nbsp;vs&nbsp; "
-        f"**Comparison:** `{comp_snap.strftime('%d %b %Y')}` &nbsp;·&nbsp; "
-        f"Δ **{delta_days} days**"
-    )
-
-    # Extract the two views and add period
-    df2 = df.copy()
-    df2["snapshot_date"] = pd.to_datetime(df2["snapshot_date"], errors="coerce")
-    df2["date"] = pd.to_datetime(df2["date"], errors="coerce")
-
+    # ── Extract the two snapshot views ───────────────────────────────────────
     latest_view  = df2[df2["snapshot_date"] == latest_snap].copy()
     compare_view = df2[df2["snapshot_date"] == comp_snap].copy()
 
+    # Apply arrival date filter
+    latest_view  = latest_view[(latest_view["date"]  >= arr_from) & (latest_view["date"]  <= arr_to)]
+    compare_view = compare_view[(compare_view["date"] >= arr_from) & (compare_view["date"] <= arr_to)]
+
     if latest_view.empty or compare_view.empty:
-        st.warning("One of the snapshots has no data for this hotel.")
+        st.warning("No data for the selected arrival date range in one of the snapshots.")
         return
 
     def _agg_view(view):
-        view = kpi_engine.add_period_col(view, "date", group_by)
-        return kpi_engine.rm_aggregate(view, ["period", "period_label"]).set_index("period")
+        v = kpi_engine.add_period_col(view, "date", group_by)
+        return kpi_engine.rm_aggregate(v, ["period", "period_label"]).set_index("period")
 
     agg_l = _agg_view(latest_view)
     agg_c = _agg_view(compare_view)
 
-    # Align on common periods
     all_periods = agg_l.index.union(agg_c.index)
     agg_l = agg_l.reindex(all_periods)
     agg_c = agg_c.reindex(all_periods)
 
     metric_label = metric.replace("_", " ").title()
-    labels = agg_l["period_label"].fillna(agg_c["period_label"]).values
-    vals_l = agg_l[metric].fillna(0).values if metric in agg_l.columns else np.zeros(len(all_periods))
-    vals_c = agg_c[metric].fillna(0).values if metric in agg_c.columns else np.zeros(len(all_periods))
-    pickup = vals_l - vals_c
+    labels  = agg_l["period_label"].fillna(agg_c["period_label"]).values
+    vals_l  = agg_l[metric].fillna(0).values if metric in agg_l.columns else np.zeros(len(all_periods))
+    vals_c  = agg_c[metric].fillna(0).values if metric in agg_c.columns else np.zeros(len(all_periods))
+    pickup  = vals_l - vals_c
 
-    # ── Chart 1: Pickup bars ─────────────────────────────────────────────────
+    # ── KPI summary row ───────────────────────────────────────────────────────
+    rs_l  = float(latest_view["rooms_sold"].sum())  if "rooms_sold"  in latest_view.columns  else np.nan
+    rs_c  = float(compare_view["rooms_sold"].sum()) if "rooms_sold"  in compare_view.columns else np.nan
+    rev_l = float(latest_view["revenue"].sum())     if "revenue"     in latest_view.columns  else np.nan
+    rev_c = float(compare_view["revenue"].sum())    if "revenue"     in compare_view.columns else np.nan
+    ra_l  = float(latest_view["rooms_available"].sum()) if "rooms_available" in latest_view.columns else np.nan
+
+    occ_l = (rs_l / ra_l * 100) if (ra_l and ra_l > 0) else np.nan
+    ra_c  = float(compare_view["rooms_available"].sum()) if "rooms_available" in compare_view.columns else np.nan
+    occ_c = (rs_c / ra_c * 100) if (ra_c and ra_c > 0) else np.nan
+
+    def _fmt(v, is_pct=False, is_money=False):
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return "N/A"
+        if is_pct:   return f"{v:.1f}%"
+        if is_money: return f"€{v:,.0f}"
+        return f"{v:,.0f}"
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Rooms (Latest)",      _fmt(rs_l),  delta=_fmt(rs_l  - rs_c)  if not np.isnan(rs_c)  else None)
+    k2.metric("Rooms (Comparison)",  _fmt(rs_c))
+    k3.metric("Revenue (Latest)",    _fmt(rev_l, is_money=True), delta=_fmt(rev_l - rev_c, is_money=True) if not np.isnan(rev_c) else None)
+    k4.metric("Revenue (Comparison)",_fmt(rev_c, is_money=True))
+    k5.metric("Occ % (Latest)",      _fmt(occ_l, is_pct=True))
+    k6.metric("Occ % (Comparison)",  _fmt(occ_c, is_pct=True))
+
+    st.markdown("---")
+
+    # ── Chart 1: Pickup delta bars ────────────────────────────────────────────
     colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"] for v in pickup]
     fig1 = go.Figure(go.Bar(
         x=labels, y=pickup,
@@ -329,19 +391,19 @@ def tab_pickup(df: pd.DataFrame) -> None:
     )
     st.plotly_chart(fig1, use_container_width=True)
 
-    # ── Chart 2: Side-by-side comparison ────────────────────────────────────
+    # ── Chart 2: Side-by-side comparison ─────────────────────────────────────
     fig2 = go.Figure()
     fig2.add_trace(go.Bar(
         x=labels, y=vals_c,
         name=f"As of {comp_snap.strftime('%d %b %Y')}",
         marker_color=BRAND_COLORS["neutral"], opacity=0.75,
-        hovertemplate="%{x}<br>Comparison: %{y:,.1f}<extra></extra>",
+        hovertemplate="%{x}<br>%{y:,.1f}<extra></extra>",
     ))
     fig2.add_trace(go.Bar(
         x=labels, y=vals_l,
         name=f"As of {latest_snap.strftime('%d %b %Y')}",
         marker_color=BRAND_COLORS["secondary"], opacity=0.9,
-        hovertemplate="%{x}<br>Latest: %{y:,.1f}<extra></extra>",
+        hovertemplate="%{x}<br>%{y:,.1f}<extra></extra>",
     ))
     fig2.update_layout(
         barmode="group",
@@ -352,33 +414,22 @@ def tab_pickup(df: pd.DataFrame) -> None:
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── KPI summary ──────────────────────────────────────────────────────────
-    # Re-derive totals from the full snapshot (not sum of derived values)
-    total_l   = float(kpi_engine.hotel_kpis(latest_view).get(metric, np.nan))
-    total_c   = float(kpi_engine.hotel_kpis(compare_view).get(metric, np.nan))
-    net       = total_l - total_c
-    pct_chg   = (net / abs(total_c) * 100) if total_c else np.nan
+    # ── Pickup detail table ───────────────────────────────────────────────────
+    with st.expander("📋 View pickup detail table"):
+        pickup_table = pd.DataFrame({
+            "Arrival Period": labels,
+            f"Comparison {comp_snap.strftime('%d %b %Y')}": vals_c.round(2),
+            f"Latest {latest_snap.strftime('%d %b %Y')}":   vals_l.round(2),
+            "Pickup (Δ)": pickup.round(2),
+        })
+        st.dataframe(pickup_table, use_container_width=True, hide_index=True)
 
-    k1, k2, k3, k4 = st.columns(4)
-    fmt_str = "{:.1f}%" if metric == "occupancy_pct" else "€{:,.2f}" if metric in ("adr","revpar") else "{:,.0f}"
-    k1.metric(f"Latest ({latest_snap.strftime('%d %b')})",    fmt_str.format(total_l) if not pd.isna(total_l) else "N/A")
-    k2.metric(f"Comparison ({comp_snap.strftime('%d %b')})",  fmt_str.format(total_c) if not pd.isna(total_c) else "N/A")
-    k3.metric("Net Pickup",  f"{net:+,.1f}" if not pd.isna(net) else "N/A")
-    k4.metric("% Change",    f"{pct_chg:+.1f}%" if not pd.isna(pct_chg) else "N/A")
-
-    # ── Export ───────────────────────────────────────────────────────────────
-    pickup_table = pd.DataFrame({
-        "Arrival Period": labels,
-        f"Comparison ({comp_snap.strftime('%d %b %Y')})": vals_c.round(2),
-        f"Latest ({latest_snap.strftime('%d %b %Y')})": vals_l.round(2),
-        "Pickup": pickup.round(2),
-    })
-    st.download_button(
-        "⬇️ Export Pickup to Excel",
-        data=exports.export_pickup(pickup_table),
-        file_name="pickup_analysis.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
+        st.download_button(
+            "⬇️ Export to Excel",
+            data=exports.export_pickup(pickup_table),
+            file_name="pickup_analysis.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 
 # ── Tab 3: Pace ───────────────────────────────────────────────────────────────
