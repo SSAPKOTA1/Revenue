@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 
 from modules import kpi_engine, forecasting, anomaly_detection, exports
-from config.settings import BRAND_COLORS
+from config.settings import BRAND_COLORS, HOTEL_COMPANY_MAP
 
 logger = logging.getLogger(__name__)
 
@@ -466,6 +466,287 @@ def tab_forecast(df: pd.DataFrame, method: str, horizon: int) -> None:
     st.plotly_chart(fig, use_container_width=True)
 
 
+# ── Company helpers ───────────────────────────────────────────────────────────
+
+def _assign_company(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a 'company' column using HOTEL_COMPANY_MAP. Unmatched hotels → 'Other'."""
+    if "hotel_name" not in df.columns:
+        return df
+    df = df.copy()
+    # Case-insensitive lookup
+    lookup = {k.lower(): v for k, v in HOTEL_COMPANY_MAP.items()}
+    df["company"] = df["hotel_name"].str.strip().str.lower().map(lookup).fillna("Other")
+    return df
+
+
+def _monthly_company_table(df: pd.DataFrame, month_label: str) -> pd.DataFrame:
+    """
+    Build the hierarchical Firma / Hotel monthly KPI table matching the
+    Excel pivot style:  hotel rows + company subtotal rows + grand total.
+
+    Columns: Firma, Hotel, Total Rooms, Sales (€), Zimmer, ADR (€), Occ %
+    """
+    df = _assign_company(df)
+
+    # Per-hotel aggregation
+    hotel_agg = kpi_engine.rm_aggregate(df, ["company", "hotel_name"])
+    if hotel_agg.empty:
+        return pd.DataFrame()
+
+    # Add total rooms (rooms_available mode = capacity per hotel)
+    if "rooms_available" in df.columns:
+        cap = (
+            df.groupby("hotel_name")["rooms_available"]
+            .apply(lambda s: int(s.mode().iloc[0]) if not s.dropna().empty else 0)
+            .reset_index()
+            .rename(columns={"rooms_available": "total_rooms"})
+        )
+        hotel_agg = hotel_agg.merge(cap, on="hotel_name", how="left")
+    else:
+        hotel_agg["total_rooms"] = 0
+
+    rows = []
+    companies = hotel_agg["company"].unique()
+
+    for company in sorted(companies):
+        grp = hotel_agg[hotel_agg["company"] == company].copy()
+        first = True
+        for _, h in grp.sort_values("hotel_name").iterrows():
+            rs  = h.get("rooms_sold", 0)    or 0
+            ra  = h.get("rooms_available", 0) or 0
+            rev = h.get("revenue", 0)        or 0
+            occ = (rs / ra * 100) if ra > 0 else 0.0
+            adr = (rev / rs)      if rs > 0 else 0.0
+            rows.append({
+                "Firma":       company if first else "",
+                "Hotel":       h["hotel_name"],
+                "Total Rooms": int(h.get("total_rooms", 0) or 0),
+                "Sales (€)":   rev,
+                "Zimmer":      int(rs),
+                "ADR (€)":     adr,
+                "Occ %":       occ,
+                "_sort":       0,
+                "_is_subtotal": False,
+                "_company":    company,
+            })
+            first = False
+
+        # Company subtotal
+        tot_rs  = grp["rooms_sold"].sum()      if "rooms_sold"      in grp.columns else 0
+        tot_ra  = grp["rooms_available"].sum() if "rooms_available" in grp.columns else 0
+        tot_rev = grp["revenue"].sum()          if "revenue"         in grp.columns else 0
+        rows.append({
+            "Firma":       f"{company} Total",
+            "Hotel":       "",
+            "Total Rooms": "",
+            "Sales (€)":   tot_rev,
+            "Zimmer":      int(tot_rs),
+            "ADR (€)":     (tot_rev / tot_rs) if tot_rs > 0 else 0.0,
+            "Occ %":       (tot_rs / tot_ra * 100) if tot_ra > 0 else 0.0,
+            "_sort":       1,
+            "_is_subtotal": True,
+            "_company":    company,
+        })
+
+    # Grand total
+    g_rs  = hotel_agg["rooms_sold"].sum()      if "rooms_sold"      in hotel_agg.columns else 0
+    g_ra  = hotel_agg["rooms_available"].sum() if "rooms_available" in hotel_agg.columns else 0
+    g_rev = hotel_agg["revenue"].sum()          if "revenue"         in hotel_agg.columns else 0
+    rows.append({
+        "Firma":       "Grand Total",
+        "Hotel":       "",
+        "Total Rooms": "",
+        "Sales (€)":   g_rev,
+        "Zimmer":      int(g_rs),
+        "ADR (€)":     (g_rev / g_rs) if g_rs > 0 else 0.0,
+        "Occ %":       (g_rs / g_ra * 100) if g_ra > 0 else 0.0,
+        "_sort":       2,
+        "_is_subtotal": True,
+        "_company":    "zzz",
+    })
+
+    return pd.DataFrame(rows)
+
+
+def _render_company_table(raw: pd.DataFrame) -> None:
+    """Render the hierarchical company/hotel table with styled subtotal rows."""
+    if raw.empty:
+        st.info("No data available.")
+        return
+
+    display = raw.drop(columns=["_sort", "_is_subtotal", "_company"], errors="ignore").copy()
+
+    # Format numeric columns
+    for col in ["Sales (€)", "ADR (€)"]:
+        if col in display.columns:
+            display[col] = display[col].apply(
+                lambda x: f"€{x:,.2f}" if isinstance(x, (int, float)) and not pd.isna(x) else x
+            )
+    if "Occ %" in display.columns:
+        display["Occ %"] = display["Occ %"].apply(
+            lambda x: f"{x:.2f}%" if isinstance(x, (int, float)) and not pd.isna(x) else x
+        )
+    if "Zimmer" in display.columns:
+        display["Zimmer"] = display["Zimmer"].apply(
+            lambda x: f"{x:,}" if isinstance(x, int) else x
+        )
+
+    # Style subtotal/total rows bold
+    is_subtotal = raw["_is_subtotal"].tolist()
+
+    def _highlight(row):
+        idx = row.name
+        if is_subtotal[idx]:
+            return ["font-weight:bold;background:#1e3a5f;color:#f0f8ff"] * len(row)
+        return [""] * len(row)
+
+    styled = display.style.apply(_highlight, axis=1)
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+
+# ── Tab: Company Analysis ─────────────────────────────────────────────────────
+
+def tab_company(df: pd.DataFrame) -> None:
+    st.subheader("🏢 Company (Firma) Analysis")
+
+    snaps = kpi_engine.get_snapshots(df)
+    current = kpi_engine.latest_snapshot_view(df) if snaps else df.copy()
+
+    # ── Month selector ────────────────────────────────────────────────────────
+    current = kpi_engine.add_period_col(current, "date", "Monthly")
+    available_months = (
+        current[["period", "period_label"]]
+        .drop_duplicates()
+        .sort_values("period")
+    )
+
+    if available_months.empty:
+        st.info("No monthly data available.")
+        return
+
+    month_options = available_months["period_label"].tolist()
+    selected_month_label = st.selectbox("📅 Select Month", month_options,
+                                        index=0, key="co_month")
+    selected_period = available_months.loc[
+        available_months["period_label"] == selected_month_label, "period"
+    ].iloc[0]
+
+    month_df = current[current["period"] == selected_period].copy()
+
+    st.markdown(f"#### Firm / Hotel KPIs — **{selected_month_label}**")
+
+    # ── Hierarchical table ────────────────────────────────────────────────────
+    raw_table = _monthly_company_table(month_df, selected_month_label)
+    _render_company_table(raw_table)
+
+    # Export
+    if not raw_table.empty:
+        export_df = raw_table.drop(columns=["_sort", "_is_subtotal", "_company"], errors="ignore")
+        buf = __import__("io").BytesIO()
+        export_df.to_excel(buf, index=False, engine="openpyxl")
+        buf.seek(0)
+        st.download_button(
+            f"⬇️ Export {selected_month_label} Table to Excel",
+            data=buf.getvalue(),
+            file_name=f"company_kpi_{selected_month_label.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.markdown("---")
+
+    # ── Company-level KPI cards ───────────────────────────────────────────────
+    st.markdown("#### Company KPI Comparison")
+    df_co = _assign_company(month_df)
+    company_agg = kpi_engine.rm_aggregate(df_co, ["company"]).sort_values("company")
+
+    if not company_agg.empty:
+        companies = company_agg["company"].tolist()
+        cols = st.columns(len(companies))
+        for i, (_, row) in enumerate(company_agg.iterrows()):
+            rs  = row.get("rooms_sold", 0) or 0
+            ra  = row.get("rooms_available", 0) or 0
+            rev = row.get("revenue", 0) or 0
+            occ = (rs / ra * 100) if ra > 0 else 0.0
+            adr = (rev / rs)      if rs > 0 else 0.0
+            rp  = (rev / ra)      if ra > 0 else 0.0
+            with cols[i]:
+                st.markdown(
+                    f"<div style='background:#1a2744;border-radius:10px;padding:14px;"
+                    f"border:1px solid rgba(255,255,255,0.1);'>"
+                    f"<p style='font-size:13px;font-weight:700;color:#60a5fa;margin:0 0 10px'>"
+                    f"{row['company']}</p>"
+                    f"<p style='margin:3px 0;font-size:12px;color:#94a3b8'>Revenue: "
+                    f"<b style='color:#f1f5f9'>€{rev:,.0f}</b></p>"
+                    f"<p style='margin:3px 0;font-size:12px;color:#94a3b8'>Rooms: "
+                    f"<b style='color:#f1f5f9'>{int(rs):,}</b></p>"
+                    f"<p style='margin:3px 0;font-size:12px;color:#94a3b8'>Occ: "
+                    f"<b style='color:#f1f5f9'>{occ:.1f}%</b></p>"
+                    f"<p style='margin:3px 0;font-size:12px;color:#94a3b8'>ADR: "
+                    f"<b style='color:#f1f5f9'>€{adr:.2f}</b></p>"
+                    f"<p style='margin:3px 0;font-size:12px;color:#94a3b8'>RevPAR: "
+                    f"<b style='color:#f1f5f9'>€{rp:.2f}</b></p>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown("---")
+
+    # ── Revenue bar chart by company ──────────────────────────────────────────
+    if not company_agg.empty and "revenue" in company_agg.columns:
+        col_a, col_b = st.columns(2)
+        with col_a:
+            fig = go.Figure(go.Bar(
+                x=company_agg["company"], y=company_agg["revenue"],
+                marker_color=[BRAND_COLORS["secondary"], BRAND_COLORS["accent"], BRAND_COLORS["success"]],
+                text=[f"€{v:,.0f}" for v in company_agg["revenue"]],
+                textposition="outside",
+            ))
+            fig.update_layout(title=f"Revenue by Company — {selected_month_label}",
+                              xaxis_title="Company", yaxis_title="Revenue (€)", **_DARK)
+            st.plotly_chart(fig, use_container_width=True)
+        with col_b:
+            if "occupancy_pct" in company_agg.columns:
+                occs = [
+                    (row["rooms_sold"] / row["rooms_available"] * 100)
+                    if row.get("rooms_available", 0) > 0 else 0
+                    for _, row in company_agg.iterrows()
+                ]
+                fig2 = go.Figure(go.Bar(
+                    x=company_agg["company"], y=occs,
+                    marker_color=[BRAND_COLORS["warning"], BRAND_COLORS["danger"], BRAND_COLORS["primary"]],
+                    text=[f"{v:.1f}%" for v in occs],
+                    textposition="outside",
+                ))
+                fig2.update_layout(title=f"Occupancy % by Company — {selected_month_label}",
+                                   xaxis_title="Company", yaxis_title="Occupancy %", **_DARK)
+                st.plotly_chart(fig2, use_container_width=True)
+
+    # ── Multi-month trend per company ─────────────────────────────────────────
+    st.markdown("#### Revenue Trend by Company (all months)")
+    df_all = _assign_company(kpi_engine.add_period_col(
+        kpi_engine.latest_snapshot_view(df) if snaps else df.copy(),
+        "date", "Monthly"
+    ))
+    trend = kpi_engine.rm_aggregate(df_all, ["company", "period", "period_label"]).sort_values("period")
+    if not trend.empty and "revenue" in trend.columns:
+        fig3 = go.Figure()
+        palette = [BRAND_COLORS["secondary"], BRAND_COLORS["accent"], BRAND_COLORS["success"],
+                   BRAND_COLORS["warning"], BRAND_COLORS["danger"]]
+        for i, (co, cdf) in enumerate(trend.groupby("company")):
+            fig3.add_trace(go.Scatter(
+                x=cdf["period_label"], y=cdf["revenue"],
+                mode="lines+markers", name=co,
+                line=dict(width=2.5, color=palette[i % len(palette)]),
+                marker=dict(size=7),
+            ))
+        fig3.update_layout(
+            title="Monthly Revenue Trend by Company",
+            xaxis_title="Month", yaxis_title="Revenue (€)",
+            hovermode="x unified", **_DARK,
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+
 # ── Tab: Anomalies ────────────────────────────────────────────────────────────
 
 def tab_anomalies(df: pd.DataFrame) -> None:
@@ -502,10 +783,11 @@ def render(df: pd.DataFrame, fc_method: str = "Prophet", fc_horizon: int = 90) -
     st.caption(f"Arrival dates: {date_min} → {date_max}  ·  {len(df):,} records  ·  "
                f"{len(snaps)} snapshots{latest_label}")
 
-    tabs = st.tabs(["📊 Overview", "🏆 Rankings", "📈 Pickup", "⏱️ Pace", "🔮 Forecast", "⚠️ Anomalies"])
+    tabs = st.tabs(["📊 Overview", "🏢 Company", "🏆 Rankings", "📈 Pickup", "⏱️ Pace", "🔮 Forecast", "⚠️ Anomalies"])
     with tabs[0]: tab_overview(df)
-    with tabs[1]: tab_rankings(df)
-    with tabs[2]: tab_pickup(df)
-    with tabs[3]: tab_pace(df)
-    with tabs[4]: tab_forecast(df, fc_method, fc_horizon)
-    with tabs[5]: tab_anomalies(df)
+    with tabs[1]: tab_company(df)
+    with tabs[2]: tab_rankings(df)
+    with tabs[3]: tab_pickup(df)
+    with tabs[4]: tab_pace(df)
+    with tabs[5]: tab_forecast(df, fc_method, fc_horizon)
+    with tabs[6]: tab_anomalies(df)

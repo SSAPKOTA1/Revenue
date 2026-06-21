@@ -193,3 +193,28 @@ ANOMALY_ROLLING_WINDOW = 14
 
 # ── Compression Threshold ──────────────────────────────────────────────────
 COMPRESSION_THRESHOLD = 85.0  # occupancy %
+
+# ── Company (Firma) → Hotel mapping ───────────────────────────────────────
+# Maps each hotel_name (as it appears after filename parsing) to its owning
+# company/Firma. Edit this list to match your actual hotel names exactly.
+HOTEL_COMPANY_MAP: dict[str, str] = {
+    # Aschaffenburg group
+    "Aschaffenburg":  "Aschaffenburg",
+    "Badsoden":       "Aschaffenburg",
+    "Giessen":        "Aschaffenburg",
+    "Gießen":         "Aschaffenburg",
+    "Postapart":      "Aschaffenburg",
+    "PostApart":      "Aschaffenburg",
+    "Rodgau":         "Aschaffenburg",
+    # Bristol Mainz group
+    "Mainz":          "Bristol Mainz",
+    # Management group
+    "Goethe":         "Management",
+    "Kaiser":         "Management",
+    "Koblenz":        "Management",
+    "Residence":      "Management",
+    "Sachsenhausen":  "Management",
+    "Soaltee":        "Management",
+    "Wetzlar":        "Management",
+    "Wiesbaden":      "Management",
+}
