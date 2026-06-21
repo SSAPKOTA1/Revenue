@@ -403,6 +403,7 @@ def scan_folder(root: str | Path) -> list[Path]:
     """
     Recursively find all Excel (.xlsx, .xls) and CSV files under root.
     Skips hidden files and __pycache__ directories.
+    Returns ALL found paths sorted (year/month/day order preserved).
     """
     root = Path(root)
     found = []
@@ -412,10 +413,90 @@ def scan_folder(root: str | Path) -> list[Path]:
                 continue
             found.append(p)
 
-    # Sort by path so year/month/day order is preserved
     found.sort()
     logger.info("Found %d data files under '%s'", len(found), root)
     return found
+
+
+# ── Snapshot date extractor ─────────────────────────────────────────────────
+
+_MONTH_NAMES = {
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+    'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10,
+    'november': 11, 'december': 12,
+    # German month names
+    'januar': 1, 'februar': 2, 'märz': 3, 'maerz': 3, 'mai': 5,
+    'juni': 6, 'juli': 7, 'august': 8, 'september': 9, 'oktober': 10,
+    'november': 11, 'dezember': 12,
+}
+
+
+def _extract_snapshot_date(filepath: Path, root: Path) -> Optional[pd.Timestamp]:
+    """
+    Derive the snapshot date from the folder structure.
+
+    Expected layouts (any depth, any order):
+        root / <year> / <month_name_or_num> / <day> / file.xlsx
+        root / <month_name> / <day> / file.xlsx   (year in root path)
+
+    Year is searched across ALL path parts (including above root).
+    Month and day are searched in the parts BETWEEN root and file.
+    """
+    all_parts  = list(filepath.parts)            # full absolute path parts
+    try:
+        root_idx = all_parts.index(root.parts[-1])
+    except ValueError:
+        root_idx = 0
+    sub_parts  = all_parts[root_idx:]            # from root downward
+
+    year = month = day = None
+
+    # --- scan sub-parts first, then full path for year ---
+    def _try_int(s: str) -> Optional[int]:
+        try:
+            return int(re.sub(r'[^0-9]', '', s)) if re.sub(r'[^0-9]', '', s) else None
+        except ValueError:
+            return None
+
+    for part in sub_parts:
+        p = part.strip().lower()
+        n = _try_int(p)
+
+        # Year: 4-digit number 2000-2099
+        if n and 2000 <= n <= 2099 and year is None:
+            year = n
+            continue
+
+        # Month name
+        if p in _MONTH_NAMES and month is None:
+            month = _MONTH_NAMES[p]
+            continue
+
+        # Numeric month or day (1–31)
+        if n and 1 <= n <= 31:
+            if month is None and n <= 12:
+                month = n
+            elif day is None:
+                day = n
+            continue
+
+    # Fallback: scan all path parts for a 4-digit year if not found yet
+    if year is None:
+        for part in all_parts:
+            n = _try_int(part)
+            if n and 2000 <= n <= 2099:
+                year = n
+                break
+
+    if year is None or month is None or day is None:
+        return None
+
+    try:
+        return pd.Timestamp(year=year, month=month, day=day)
+    except Exception:
+        return None
 
 
 # ── Master loader ───────────────────────────────────────────────────────────
@@ -425,18 +506,25 @@ def load_all_files(
     progress_callback=None,
 ) -> tuple[pd.DataFrame, list[dict]]:
     """
-    Scan root folder recursively, parse all hotel files, and merge into
-    a single master DataFrame.
+    Scan root folder, read EVERY hotel file, tag each row with its
+    snapshot_date (extracted from the folder path), then merge.
+
+    This enables pickup analysis:
+        For a given (hotel, arrival_date), how did rooms/revenue change
+        between snapshot dates?
 
     Returns
     -------
-    master_df    : merged and lightly cleaned DataFrame
-    file_reports : list[dict] with per-file ingestion metadata
+    master_df    : merged DataFrame with columns including snapshot_date
+    file_reports : list[dict] per-file ingestion metadata
     """
+    root = Path(root)
     files = scan_folder(root)
     if not files:
         logger.warning("No data files found under '%s'", root)
         return pd.DataFrame(), []
+
+    logger.info("Reading %d files (all snapshots)…", len(files))
 
     frames: list[pd.DataFrame] = []
     file_reports: list[dict] = []
@@ -444,22 +532,26 @@ def load_all_files(
     for i, fp in enumerate(files):
         report = {
             'file': fp.name,
-            'path': str(fp.relative_to(root) if root in fp.parents or fp.is_relative_to(root) else fp),
+            'path': str(fp.relative_to(root) if fp.is_relative_to(root) else fp),
             'status': 'ok',
             'rows': 0,
             'hotel': '',
-            'format': '',
+            'snapshot_date': '',
             'error': '',
         }
 
+        snapshot_date = _extract_snapshot_date(fp, root)
         df = _read_single_file(fp)
+
         if df is None or df.empty:
             report['status'] = 'empty' if df is not None else 'error'
             report['error'] = 'No data parsed' if df is not None else 'Read failure'
         else:
+            # Tag every row with its snapshot date
+            df['snapshot_date'] = snapshot_date
             report['rows'] = len(df)
             report['hotel'] = df['hotel_name'].iloc[0] if 'hotel_name' in df.columns else ''
-            report['format'] = df.get('_source_file', pd.Series(['']))[0]
+            report['snapshot_date'] = str(snapshot_date.date()) if snapshot_date else 'unknown'
             frames.append(df)
 
         file_reports.append(report)
@@ -473,16 +565,18 @@ def load_all_files(
 
     master = pd.concat(frames, ignore_index=True)
 
-    # Remove exact duplicates (same date + hotel from identical files)
+    # Deduplicate on (hotel, arrival_date, snapshot_date) — keep last
+    dedup_keys = [c for c in ['hotel_name', 'date', 'snapshot_date'] if c in master.columns]
     before = len(master)
-    master = master.drop_duplicates(subset=['date', 'hotel_name'], keep='last')
-    if len(master) < before:
-        logger.info("Removed %d duplicate rows after merge", before - len(master))
+    master = master.drop_duplicates(subset=dedup_keys, keep='last')
+    removed = before - len(master)
+    if removed:
+        logger.info("Removed %d exact duplicate rows after merge", removed)
 
+    n_snapshots = master['snapshot_date'].nunique() if 'snapshot_date' in master.columns else 0
+    n_hotels    = master['hotel_name'].nunique()    if 'hotel_name'    in master.columns else 0
     logger.info(
-        "Master DataFrame: %d rows, %d hotels, %d cols",
-        len(master),
-        master['hotel_name'].nunique() if 'hotel_name' in master.columns else 0,
-        len(master.columns),
+        "Master DataFrame: %d rows | %d hotels | %d snapshots | %d cols",
+        len(master), n_hotels, n_snapshots, len(master.columns),
     )
     return master, file_reports

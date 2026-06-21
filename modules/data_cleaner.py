@@ -35,9 +35,8 @@ def clean(df: pd.DataFrame) -> pd.DataFrame:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"])
 
-    # 2. Dedup
-    dup_keys = [c for c in ["date", "hotel_name", "_source_file", "_source_sheet"] if c in df.columns]
-    dedup_keys = [c for c in ["date", "hotel_name"] if c in df.columns]
+    # 2. Dedup — include snapshot_date so each (hotel, arrival_date, snapshot) is unique
+    dedup_keys = [c for c in ["date", "hotel_name", "snapshot_date"] if c in df.columns]
     if dedup_keys:
         before = len(df)
         df = df.drop_duplicates(subset=dedup_keys, keep="last")

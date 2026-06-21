@@ -191,28 +191,95 @@ def tab_performance(df: pd.DataFrame) -> None:
 
 def tab_pickup(df: pd.DataFrame) -> None:
     st.subheader("Pickup Analysis")
-    pickup_df = pickup_pace.compute_pickup(df)
-    if pickup_df.empty:
-        st.info("Pickup analysis requires temporal data. Please ensure date column is present.")
+
+    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
+    available_metrics = [m for m in ["rooms_sold", "revenue", "adr"] if m in df.columns]
+    if not available_metrics:
+        st.info("No pickup metrics found in data.")
         return
 
-    available_metrics = [m for m in ["rooms_sold", "revenue", "adr"] if m in df.columns]
     metric = st.selectbox("Pickup Metric", available_metrics, key="hotel_pickup_metric")
 
-    for w in [1, 7, 14, 30]:
-        col = f"{metric}_pickup_{w}d"
-        if col in pickup_df.columns:
+    if has_snapshots:
+        n_snaps = df["snapshot_date"].nunique()
+        st.caption(
+            f"📅 {n_snaps} daily snapshots detected — showing true pickup "
+            f"(on-books change between snapshot dates)."
+        )
+
+        pickup_df = pickup_pace.compute_pickup(df, metrics=available_metrics)
+        if pickup_df.empty:
+            st.info("Not enough snapshots to compute pickup.")
+            return
+
+        # Aggregate pickup across all arrival dates per snapshot date
+        snap_col = "snapshot_date"
+        for w in [1, 7, 14, 30]:
+            col = f"{metric}_pickup_{w}d"
+            if col not in pickup_df.columns:
+                continue
+            agg = pickup_df.groupby(snap_col)[col].sum().reset_index()
+            agg.columns = [snap_col, col]
             fig = visualizations.area_chart(
-                pickup_df, "date", col,
-                title=f"{w}-Day Pickup: {metric.replace('_', ' ').title()}",
+                agg, snap_col, col,
+                title=f"{w}-Day Pickup: {metric.replace('_',' ').title()} (by Snapshot Date)",
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    # Waterfall
-    cols = [f"{metric}_pickup_{w}d" for w in [1, 7, 14, 30] if f"{metric}_pickup_{w}d" in pickup_df.columns]
+        # Pickup curve for a selected arrival date
+        st.subheader("Booking Build-Up Curve")
+        future_dates = sorted(df["date"].dropna().unique())
+        if future_dates:
+            sel_date = st.selectbox(
+                "Select Arrival Date",
+                future_dates,
+                format_func=lambda d: pd.Timestamp(d).strftime("%Y-%m-%d"),
+                key="hotel_pickup_arrival",
+            )
+            hotel = df["hotel_name"].iloc[0] if "hotel_name" in df.columns else None
+            if hotel:
+                curve = pickup_pace.pickup_curve(df, hotel, pd.Timestamp(sel_date), metric)
+                if not curve.empty:
+                    import plotly.graph_objects as go
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(
+                        x=curve["days_to_arrival"][::-1],
+                        y=curve[metric],
+                        mode="lines+markers",
+                        line=dict(color="#2E86C1", width=2),
+                        name=metric,
+                    ))
+                    fig.update_layout(
+                        title=f"Booking Build-Up: {metric} for {pd.Timestamp(sel_date).strftime('%d %b %Y')}",
+                        xaxis_title="Days Before Arrival",
+                        xaxis_autorange="reversed",
+                        template="plotly_dark",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        plot_bgcolor="rgba(0,0,0,0)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+    else:
+        # Single snapshot fallback
+        st.caption("Single snapshot detected — showing day-over-day differences.")
+        pickup_df = pickup_pace.compute_pickup(df, metrics=available_metrics)
+        if pickup_df.empty:
+            st.info("Pickup analysis requires at least 2 data points.")
+            return
+        for w in [1, 7, 14, 30]:
+            col = f"{metric}_pickup_{w}d"
+            if col in pickup_df.columns:
+                fig = visualizations.area_chart(
+                    pickup_df, "date", col,
+                    title=f"{w}-Day Pickup: {metric.replace('_', ' ').title()}",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+    # Waterfall summary
+    pickup_df2 = pickup_pace.compute_pickup(df, metrics=available_metrics)
+    cols = [f"{metric}_pickup_{w}d" for w in [1, 7, 14, 30] if f"{metric}_pickup_{w}d" in pickup_df2.columns]
     if cols:
-        vals = [float(pickup_df[c].sum()) for c in cols]
-        labels = ["1-Day", "7-Day", "14-Day", "30-Day"][: len(vals)]
+        vals = [float(pickup_df2[c].sum()) for c in cols]
+        labels = ["1-Day", "7-Day", "14-Day", "30-Day"][:len(vals)]
         fig = visualizations.waterfall_chart(labels, vals, title=f"Pickup Waterfall: {metric}")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -221,6 +288,16 @@ def tab_pickup(df: pd.DataFrame) -> None:
 
 def tab_pace(df: pd.DataFrame) -> None:
     st.subheader("Pace Analysis")
+
+    has_snapshots = "snapshot_date" in df.columns and df["snapshot_date"].notna().any()
+    if has_snapshots:
+        snaps = sorted(df["snapshot_date"].dropna().unique())
+        latest = pd.Timestamp(snaps[-1])
+        st.caption(
+            f"📅 {len(snaps)} snapshots available. "
+            f"Current position: **{latest.strftime('%d %b %Y')}**"
+        )
+
     benchmark = st.selectbox(
         "Benchmark",
         ["last_year", "budget", "forecast", "portfolio_avg"],
