@@ -13,6 +13,92 @@ from config.settings import BRAND_COLORS, COMPRESSION_THRESHOLD, KPI_FORMAT
 logger = logging.getLogger(__name__)
 
 
+# ── Revenue Management aggregation helper ────────────────────────────────────
+
+def _rm_agg(df: pd.DataFrame, group_col: str, metric: str) -> pd.DataFrame:
+    """
+    Aggregate raw room/revenue data using correct RM formulas.
+
+    ADR       = Σ Revenue / Σ Rooms Sold          (never average ADR directly)
+    Occupancy = Σ Rooms Sold / Σ Rooms Available  (never average occ% directly)
+    RevPAR    = Σ Revenue / Σ Rooms Available
+    Revenue   = Σ Revenue
+    Rooms Sold= Σ Rooms Sold
+
+    Returns a DataFrame with columns [group_col, metric] where metric
+    is calculated with the correct formula.
+    """
+    if df.empty or group_col not in df.columns:
+        return pd.DataFrame()
+
+    # Always sum the additive base columns
+    sum_cols = [c for c in ["rooms_sold", "rooms_available", "revenue"] if c in df.columns]
+    if not sum_cols:
+        return pd.DataFrame()
+
+    base = df.groupby(group_col)[sum_cols].sum(min_count=1).reset_index()
+
+    # Derive requested metric from the summed bases
+    if metric == "occupancy_pct":
+        if "rooms_sold" in base.columns and "rooms_available" in base.columns:
+            base[metric] = (
+                base["rooms_sold"] / base["rooms_available"].replace(0, np.nan) * 100
+            ).clip(0, 100)
+        elif "occupancy_pct" in df.columns:
+            # Fall back: weighted mean using rooms_available as weight
+            wm = (
+                df.groupby(group_col)
+                .apply(lambda g: np.average(
+                    g["occupancy_pct"].fillna(0),
+                    weights=g.get("rooms_available", pd.Series(np.ones(len(g)))).fillna(1)
+                ))
+                .reset_index(name=metric)
+            )
+            base = base.merge(wm, on=group_col, how="left")
+
+    elif metric == "adr":
+        if "revenue" in base.columns and "rooms_sold" in base.columns:
+            base[metric] = base["revenue"] / base["rooms_sold"].replace(0, np.nan)
+        elif "adr" in df.columns:
+            # Weighted mean using rooms_sold as weight
+            wm = (
+                df.groupby(group_col)
+                .apply(lambda g: np.average(
+                    g["adr"].fillna(0),
+                    weights=g.get("rooms_sold", pd.Series(np.ones(len(g)))).fillna(1)
+                ))
+                .reset_index(name=metric)
+            )
+            base = base.merge(wm, on=group_col, how="left")
+
+    elif metric == "revpar":
+        if "revenue" in base.columns and "rooms_available" in base.columns:
+            base[metric] = base["revenue"] / base["rooms_available"].replace(0, np.nan)
+        elif "revpar" in df.columns:
+            wm = (
+                df.groupby(group_col)
+                .apply(lambda g: np.average(
+                    g["revpar"].fillna(0),
+                    weights=g.get("rooms_available", pd.Series(np.ones(len(g)))).fillna(1)
+                ))
+                .reset_index(name=metric)
+            )
+            base = base.merge(wm, on=group_col, how="left")
+
+    elif metric == "revenue":
+        pass  # already summed above
+
+    elif metric == "rooms_sold":
+        pass  # already summed above
+
+    else:
+        # Generic numeric: sum if additive, mean otherwise
+        if metric in df.columns:
+            base[metric] = df.groupby(group_col)[metric].sum(min_count=1).values
+
+    return base[[group_col, metric]].copy()
+
+
 # ── KPI Card helper ──────────────────────────────────────────────────────────
 
 def _kpi_card(label: str, value: float | str, fmt: str = "{:,.2f}", delta: Optional[float] = None) -> str:
@@ -311,8 +397,9 @@ def tab_pickup(df: pd.DataFrame) -> None:
             f["period"] = f["date"].dt.to_period("Y").apply(lambda p: p.start_time)
         return f
 
-    latest_agg = _add_period(latest_view).groupby("period")[metric].sum(min_count=1).rename("latest")
-    compare_agg = _add_period(compare_view).groupby("period")[metric].sum(min_count=1).rename("compare")
+    # Use proper RM formulas — ADR = Σrev/Σrooms, Occ% = Σsold/Σavail
+    latest_agg = _rm_agg(_add_period(latest_view), "period", metric).set_index("period")[metric].rename("latest")
+    compare_agg = _rm_agg(_add_period(compare_view), "period", metric).set_index("period")[metric].rename("compare")
 
     combined = pd.concat([latest_agg, compare_agg], axis=1).dropna(how="all").reset_index()
     combined["pickup"] = combined["latest"].fillna(0) - combined["compare"].fillna(0)
@@ -378,15 +465,28 @@ def tab_pickup(df: pd.DataFrame) -> None:
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Summary KPIs ────────────────────────────────────────────────────────
-    total_latest = combined["latest"].sum()
-    total_compare = combined["compare"].sum()
-    total_pickup = combined["pickup"].sum()
+    # ── Summary KPIs — use correct RM formula for the whole period ──────────
+    # For additive metrics (rooms, revenue): sum all periods
+    # For derived metrics (ADR, Occ%): re-derive from the totals, not sum of derived values
+    is_derived = metric in ("adr", "occupancy_pct", "revpar")
+
+    if is_derived:
+        total_latest = float(_rm_agg(latest_view, pd.Series(["all"] * len(latest_view), index=latest_view.index)
+                                     .rename("_all").reset_index(drop=True).pipe(
+                                         lambda _: latest_view.assign(_all="all")), "_all", metric)[metric].iloc[0]) \
+            if False else float(_rm_agg(latest_view.assign(_all="all"), "_all", metric)[metric].iloc[0])
+        total_compare = float(_rm_agg(compare_view.assign(_all="all"), "_all", metric)[metric].iloc[0])
+    else:
+        total_latest = combined["latest"].sum()
+        total_compare = combined["compare"].sum()
+
+    total_pickup = total_latest - total_compare
     pct_change = (total_pickup / abs(total_compare) * 100) if total_compare else 0
 
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"Total {metric_label} (Latest)", f"{total_latest:,.1f}")
-    k2.metric(f"Total {metric_label} (Comparison)", f"{total_compare:,.1f}")
+    fmt = "{:.1f}%" if metric == "occupancy_pct" else "${:,.2f}" if metric in ("adr", "revpar") else "{:,.1f}"
+    k1.metric(f"{metric_label} (Latest)", fmt.format(total_latest))
+    k2.metric(f"{metric_label} (Comparison)", fmt.format(total_compare))
     k3.metric("Net Pickup", f"{total_pickup:+,.1f}")
     k4.metric("% Change", f"{pct_change:+.1f}%")
 
@@ -492,13 +592,12 @@ def tab_pace(df: pd.DataFrame) -> None:
         st.warning("No data for the selected arrival date(s). Try a different date.")
         return
 
-    # ── Aggregate by snapshot date ──────────────────────────────────────────
-    agg_func = "mean" if metric in ("adr", "occupancy_pct") else "sum"
+    # ── Aggregate by snapshot date using correct RM formulas ───────────────
+    # ADR = Σrev/Σrooms_sold,  Occ% = Σrooms_sold/Σrooms_avail,  RevPAR = Σrev/Σrooms_avail
     pace_series = (
-        selected.groupby("snapshot_date")[metric]
-        .agg(agg_func)
-        .reset_index()
+        _rm_agg(selected, "snapshot_date", metric)
         .sort_values("snapshot_date")
+        .reset_index(drop=True)
     )
 
     if pace_series.empty or len(pace_series) < 2:
@@ -555,8 +654,12 @@ def tab_pace(df: pd.DataFrame) -> None:
 
     # ── Period-over-period pace comparison ──────────────────────────────────
     st.subheader("Weekly Pace Change")
-    st.caption("Change in on-books from week to week (7-day intervals in snapshot dates).")
-    pace_series["weekly_change"] = pace_series[metric].diff(7).fillna(pace_series[metric].diff())
+    st.caption("Change in on-books from one snapshot to the one 7 days earlier.")
+    # diff on the correctly-derived metric series (already one row per snapshot)
+    pace_series = pace_series.copy()
+    pace_series["weekly_change"] = pace_series[metric].diff(
+        min(7, max(1, len(pace_series) // 4))
+    ).fillna(pace_series[metric].diff(1))
     fig2 = go.Figure()
     colors = [BRAND_COLORS["success"] if v >= 0 else BRAND_COLORS["danger"]
               for v in pace_series["weekly_change"]]
@@ -587,8 +690,7 @@ def tab_pace(df: pd.DataFrame) -> None:
             color_cycle = [BRAND_COLORS["secondary"], BRAND_COLORS["accent"],
                            BRAND_COLORS["success"], BRAND_COLORS["warning"]]
             for i, m in enumerate(available):
-                agg_fn = "mean" if m in ("adr", "occupancy_pct") else "sum"
-                s = selected.groupby("snapshot_date")[m].agg(agg_fn).reset_index().sort_values("snapshot_date")
+                s = _rm_agg(selected, "snapshot_date", m).sort_values("snapshot_date")
                 if s.empty:
                     continue
                 # Normalise to index (100 = first snapshot) for comparison

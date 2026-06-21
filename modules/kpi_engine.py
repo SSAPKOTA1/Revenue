@@ -139,32 +139,50 @@ def aggregate_daily(df: pd.DataFrame, hotel_col: str = "hotel_name") -> pd.DataF
 
 
 def weekday_performance(df: pd.DataFrame) -> pd.DataFrame:
-    """Average KPIs by day-of-week."""
+    """KPIs by day-of-week using correct RM formulas."""
     if df.empty or "day_of_week" not in df.columns:
         return pd.DataFrame()
 
     day_map = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
-    metrics = [c for c in ["occupancy_pct", "adr", "revpar", "revenue", "rooms_sold"] if c in df.columns]
-    if not metrics:
+    sum_cols = [c for c in ["rooms_sold", "rooms_available", "revenue"] if c in df.columns]
+    if not sum_cols:
         return pd.DataFrame()
 
-    out = df.groupby("day_of_week")[metrics].mean().reset_index()
+    # Sum the bases, then derive — gives the true weighted average per weekday
+    out = df.groupby("day_of_week")[sum_cols].sum(min_count=1).reset_index()
+
+    if "rooms_sold" in out.columns and "rooms_available" in out.columns:
+        out["occupancy_pct"] = (out["rooms_sold"] / out["rooms_available"].replace(0, np.nan) * 100).clip(0, 100)
+    if "revenue" in out.columns and "rooms_sold" in out.columns:
+        out["adr"] = out["revenue"] / out["rooms_sold"].replace(0, np.nan)
+    if "revenue" in out.columns and "rooms_available" in out.columns:
+        out["revpar"] = out["revenue"] / out["rooms_available"].replace(0, np.nan)
+
     out["day_name"] = out["day_of_week"].map(day_map)
     return out.sort_values("day_of_week")
 
 
 def monthly_performance(df: pd.DataFrame) -> pd.DataFrame:
-    """Average KPIs by month-of-year (seasonality)."""
+    """KPIs by month-of-year (seasonality) using correct RM formulas."""
     if df.empty or "month" not in df.columns:
         return pd.DataFrame()
 
     month_map = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                  7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
-    metrics = [c for c in ["occupancy_pct", "adr", "revpar", "revenue", "rooms_sold"] if c in df.columns]
-    if not metrics:
+
+    sum_cols = [c for c in ["rooms_sold", "rooms_available", "revenue"] if c in df.columns]
+    if not sum_cols:
         return pd.DataFrame()
 
-    out = df.groupby("month")[metrics].mean().reset_index()
+    out = df.groupby("month")[sum_cols].sum(min_count=1).reset_index()
+
+    if "rooms_sold" in out.columns and "rooms_available" in out.columns:
+        out["occupancy_pct"] = (out["rooms_sold"] / out["rooms_available"].replace(0, np.nan) * 100).clip(0, 100)
+    if "revenue" in out.columns and "rooms_sold" in out.columns:
+        out["adr"] = out["revenue"] / out["rooms_sold"].replace(0, np.nan)
+    if "revenue" in out.columns and "rooms_available" in out.columns:
+        out["revpar"] = out["revenue"] / out["rooms_available"].replace(0, np.nan)
+
     out["month_name"] = out["month"].map(month_map)
     return out.sort_values("month")
 
