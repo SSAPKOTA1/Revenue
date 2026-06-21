@@ -34,15 +34,31 @@ def _card(label: str, value: str, col) -> None:
     )
 
 
+def _safe(v, default=0.0):
+    """Return v if finite, else default."""
+    try:
+        return default if (v is None or (isinstance(v, float) and np.isnan(v))) else v
+    except Exception:
+        return default
+
+
 def _kpi_row(df: pd.DataFrame) -> None:
-    kpis = kpi_engine.hotel_kpis(df)
+    # Compute totals directly from the DataFrame — never rely on pre-aggregated KPI values
+    rs  = float(df["rooms_sold"].sum())      if "rooms_sold"      in df.columns else 0.0
+    ra  = float(df["rooms_available"].sum()) if "rooms_available" in df.columns else 0.0
+    rev = float(df["revenue"].sum())         if "revenue"         in df.columns else 0.0
+    occ = (rs / ra * 100) if ra > 0 else 0.0
+    adr = (rev / rs)      if rs > 0 else 0.0
+    rp  = (rev / ra)      if ra > 0 else 0.0
+    n_hotels = int(df["hotel_name"].nunique()) if "hotel_name" in df.columns else 0
+
     cols = st.columns(6)
-    _card("Hotels",    str(int(kpis.get("hotel_count", 0))),   cols[0])
-    _card("Occupancy", f"{kpis.get('occupancy_pct', 0):.1f}%", cols[1])
-    _card("ADR",       f"€{kpis.get('adr', 0):,.2f}",          cols[2])
-    _card("RevPAR",    f"€{kpis.get('revpar', 0):,.2f}",       cols[3])
-    _card("Revenue",   f"€{kpis.get('revenue', 0):,.0f}",      cols[4])
-    _card("Rooms Sold",f"{int(kpis.get('rooms_sold', 0)):,}",  cols[5])
+    _card("Hotels",     str(n_hotels),            cols[0])
+    _card("Occupancy",  f"{occ:.1f}%",            cols[1])
+    _card("ADR",        f"€{adr:,.2f}",           cols[2])
+    _card("RevPAR",     f"€{rp:,.2f}",            cols[3])
+    _card("Revenue",    f"€{rev:,.0f}",           cols[4])
+    _card("Rooms Sold", f"{int(rs):,}",           cols[5])
 
 
 # ── Tab: Overview ─────────────────────────────────────────────────────────────
