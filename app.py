@@ -73,13 +73,6 @@ def _header() -> None:
 
 
 # ── Data loading ────────────────────────────────────────────────────────────
-def _do_scan(folder: str) -> tuple[pd.DataFrame, list[dict]]:
-    raw_df, file_reports = data_loader.load_all_files(folder)
-    if raw_df.empty:
-        return raw_df, file_reports
-    cleaned = data_cleaner.clean(raw_df)
-    return cleaned, file_reports
-
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def _load_from_sqlite() -> pd.DataFrame:
@@ -88,20 +81,27 @@ def _load_from_sqlite() -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
 
 
-def _load_from_cache_or_scan(folder: str, force: bool = False) -> tuple[pd.DataFrame, list[dict], str]:
-    """Returns (df, file_reports, source) where source is 'cache' or 'scan'."""
-    if not force:
-        is_valid, _ = cache_manager.cache_is_valid(folder)
-        if is_valid:
-            # Use Streamlit-cached loader so repeated interactions are instant
+def _ingest(folder: str, force: bool = False) -> tuple[pd.DataFrame, dict, str]:
+    """
+    Incremental ingest: only parse files that are new or changed.
+    Returns (df, summary, source_label).
+    """
+    if force:
+        with st.spinner("Rebuilding database from scratch…"):
+            summary = cache_manager.full_rebuild(folder)
+        source = "full rebuild"
+    else:
+        has_new, n_new = cache_manager.has_new_files(folder)
+        if not has_new:
             df = _load_from_sqlite()
-            if not df.empty:
-                return df, [], "cache"
-    df, reports = _do_scan(folder)
-    if not df.empty:
-        cache_manager.save_cache(df, folder, reports)
-        _load_from_sqlite.clear()   # invalidate Streamlit cache after new scan
-    return df, reports, "scan"
+            return df, {"new": 0, "skipped": 0}, "cache"
+        with st.spinner(f"Loading {n_new} new file(s)…"):
+            summary = cache_manager.ingest_new_files(folder)
+        source = f"+{summary.get('new', 0)} new files"
+
+    _load_from_sqlite.clear()   # bust Streamlit's in-memory cache
+    df = _load_from_sqlite()
+    return df, summary, source
 
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────
@@ -122,8 +122,9 @@ def _sidebar(df: pd.DataFrame) -> dict:
                 r"Example: U:\FFM_ZENTRALE\Sudip\REVENUE MANAGEMENT\2026\Belegung Data\ALl itsels"
             ),
         )
-        load_btn = st.button("🔄 Load / Refresh Data", use_container_width=True, type="primary")
-        force_btn = st.button("⚡ Force Re-scan (bypass cache)", use_container_width=True)
+        load_btn = st.button("🔄 Check for New Files", use_container_width=True, type="primary")
+        force_btn = st.button("⚡ Force Full Rebuild", use_container_width=True,
+                              help="Re-parse ALL files from scratch. Only needed if data was corrected.")
 
         # ── Cache info ─────────────────────────────────────────────────────
         info = cache_manager.get_cache_info()
@@ -343,17 +344,16 @@ def main() -> None:
     if not st.session_state["auto_load_done"] and df.empty:
         auto_folder = (DEFAULT_DATA_FOLDER or "").strip()
         if auto_folder and Path(auto_folder).exists():
-            with st.spinner(f"Auto-loading data from:\n{auto_folder}"):
-                try:
-                    new_df, reports, source = _load_from_cache_or_scan(auto_folder)
-                    if not new_df.empty:
-                        st.session_state["df"] = new_df
-                        st.session_state["file_reports"] = reports
-                        st.session_state["last_folder"] = auto_folder
-                        df = new_df
-                        logger.info("Auto-loaded %d rows (%s)", len(new_df), source)
-                except Exception as e:
-                    logger.error("Auto-load failed: %s", e)
+            try:
+                new_df, summary, source = _ingest(auto_folder, force=False)
+                if not new_df.empty:
+                    st.session_state["df"] = new_df
+                    st.session_state["file_reports"] = summary.get("file_reports", [])
+                    st.session_state["last_folder"] = auto_folder
+                    df = new_df
+                    logger.info("Auto-loaded %d rows (%s)", len(new_df), source)
+            except Exception as e:
+                logger.error("Auto-load failed: %s", e)
         st.session_state["auto_load_done"] = True
 
     # ── User-triggered load ─────────────────────────────────────────────────
@@ -365,28 +365,28 @@ def main() -> None:
             st.sidebar.error(f"Folder not found: `{folder}`")
         else:
             st.session_state["last_folder"] = folder
-            with st.spinner("Loading data…"):
-                try:
-                    prog = st.progress(0, text="Scanning…")
-                    new_df, reports, source = _load_from_cache_or_scan(folder, force=sel["force"])
-                    prog.progress(1.0, text="Done.")
-                    prog.empty()
-                    if new_df.empty:
-                        st.sidebar.warning("No hotel files found. Check path and file formats.")
+            try:
+                new_df, summary, source = _ingest(folder, force=sel["force"])
+                if new_df.empty:
+                    st.sidebar.warning("No hotel files found.")
+                else:
+                    st.session_state["df"] = new_df
+                    st.session_state["file_reports"] = summary.get("file_reports", [])
+                    df = new_df
+                    n_new  = summary.get("new", 0)
+                    n_skip = summary.get("skipped", 0)
+                    snaps  = kpi_engine.get_snapshots(new_df)
+                    if source == "cache":
+                        st.sidebar.info(f"✅ Already up-to-date · {len(new_df):,} rows · {len(snaps)} snapshots")
                     else:
-                        st.session_state["df"] = new_df
-                        st.session_state["file_reports"] = reports
-                        df = new_df
-                        st.session_state["file_reports"] = reports
-                        snaps = kpi_engine.get_snapshots(new_df)
                         st.sidebar.success(
-                            f"✅ {len(new_df):,} rows · {len(snaps)} snapshots  "
-                            f"({'cache' if source == 'cache' else f'{len(reports)} files'})"
+                            f"✅ {n_new} new file(s) loaded · {n_skip} skipped (already cached)  \n"
+                            f"{len(new_df):,} total rows · {len(snaps)} snapshots"
                         )
-                        st.rerun()
-                except Exception as e:
-                    logger.error("Load error: %s\n%s", e, traceback.format_exc())
-                    st.sidebar.error(f"Load error: {e}")
+                    st.rerun()
+            except Exception as e:
+                logger.error("Load error: %s\n%s", e, traceback.format_exc())
+                st.sidebar.error(f"Load error: {e}")
 
     df = st.session_state["df"]
     file_reports = st.session_state["file_reports"]
