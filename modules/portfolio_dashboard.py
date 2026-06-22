@@ -13,6 +13,10 @@ from config.settings import BRAND_COLORS, HOTEL_COMPANY_MAP
 
 logger = logging.getLogger(__name__)
 
+_C_BLUE  = "#3b82f6"
+_C_GREEN = "#10b981"
+_C_AMBER = "#f59e0b"
+
 _DARK = dict(
     template="plotly_dark",
     paper_bgcolor="rgba(0,0,0,0)",
@@ -254,6 +258,60 @@ def tab_overview(df: pd.DataFrame) -> None:
         ("revpar",          "RevPAR (€)",        "rate"),
         ("revenue",         "Revenue (€)",       "rev"),
     ]
+
+    # ── Combo chart: Revenue bars + secondary-axis line ──────────────────────
+    if not monthly.empty and "revenue" in monthly.columns:
+        _LINE_OPTS = {"Occupancy %": "occupancy_pct", "RevPAR (€)": "revpar",
+                      "ADR (€)": "adr", "Occupancy % + RevPAR": "__both__"}
+        line_choice = st.selectbox(
+            "Secondary line metric",
+            list(_LINE_OPTS.keys()),
+            index=0,
+            key="monthly_line_metric",
+        )
+        line_col = _LINE_OPTS[line_choice]
+        m_labels = monthly["period_label"].tolist()
+        rev_vals = monthly["revenue"].tolist()
+
+        combo = go.Figure()
+
+        # Revenue bars (primary y)
+        combo.add_trace(go.Bar(
+            x=m_labels, y=rev_vals, name="Revenue (€)",
+            marker_color=_C_BLUE,
+            text=[f"€{v:,.0f}" for v in rev_vals],
+            textposition="outside",
+            yaxis="y",
+        ))
+
+        line_colors = [_C_AMBER, _C_GREEN]
+        line_cols = (
+            [("occupancy_pct", "Occupancy %"), ("revpar", "RevPAR (€)")]
+            if line_col == "__both__"
+            else [(line_col, line_choice)]
+        )
+        for idx, (lcol, lname) in enumerate(line_cols):
+            if lcol in monthly.columns:
+                lvals = monthly[lcol].tolist()
+                combo.add_trace(go.Scatter(
+                    x=m_labels, y=lvals,
+                    name=lname, mode="lines+markers",
+                    line=dict(color=line_colors[idx], width=2),
+                    marker=dict(size=7),
+                    yaxis="y2",
+                ))
+
+        combo.update_layout(
+            title=f"{cur_year} Monthly Revenue & {line_choice}",
+            yaxis=dict(title="Revenue (€)", showgrid=False),
+            yaxis2=dict(title=line_choice, overlaying="y", side="right",
+                        showgrid=False),
+            barmode="group",
+            legend=dict(orientation="h", y=-0.15),
+            hovermode="x unified",
+            **_DARK,
+        )
+        st.plotly_chart(combo, use_container_width=True)
 
     if not monthly.empty:
         rows = []
