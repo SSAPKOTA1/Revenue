@@ -1067,7 +1067,11 @@ def tab_yoy(df: pd.DataFrame) -> None:
     st.dataframe(tbl, use_container_width=True, hide_index=True)
 
     from modules import exports as _exp
-    excel = _exp.to_excel_bytes({"YoY": tbl})
+    import io as _io
+    buf = _io.BytesIO()
+    tbl.to_excel(buf, index=False, engine="openpyxl")
+    buf.seek(0)
+    excel = buf.getvalue()
     if excel:
         st.download_button(
             f"⬇️ Export YoY Table ({year_cur} vs {year_prev})",
