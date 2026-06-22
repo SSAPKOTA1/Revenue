@@ -26,7 +26,7 @@ from modules import (
     data_loader, data_validator, data_cleaner,
     kpi_engine, exports,
     hotel_dashboard, portfolio_dashboard,
-    cache_manager,
+    cache_manager, chatbot,
 )
 
 # ── Logging ────────────────────────────────────────────────────────────────
@@ -484,6 +484,66 @@ def _quality_panel(df: pd.DataFrame, file_reports: list[dict]) -> None:
             pass
 
 
+# ── Chat tab ─────────────────────────────────────────────────────────────────
+def _chat_tab(df: pd.DataFrame) -> None:
+    st.markdown(
+        "<h3 style='margin-bottom:4px'>💬 Ask your data</h3>"
+        "<p style='color:#475569;font-size:0.82rem;margin-bottom:16px'>"
+        "Ask questions in plain English — no SQL needed.</p>",
+        unsafe_allow_html=True,
+    )
+
+    if df.empty:
+        st.info("Load your hotel data first, then ask questions here.")
+        return
+
+    # Session state for chat history
+    if "chat_history" not in st.session_state:
+        st.session_state["chat_history"] = []
+
+    # Example question chips (shown when no history)
+    if not st.session_state["chat_history"]:
+        st.markdown(
+            "<p style='font-size:0.75rem;color:#374151;margin-bottom:8px;font-weight:600;"
+            "text-transform:uppercase;letter-spacing:0.08em'>Try asking:</p>",
+            unsafe_allow_html=True,
+        )
+        cols = st.columns(3)
+        examples = chatbot.example_questions()
+        for i, ex in enumerate(examples[:6]):
+            if cols[i % 3].button(ex, key=f"ex_{i}", use_container_width=True):
+                st.session_state["chat_history"].append({"role": "user", "content": ex})
+                resp = chatbot.answer(ex, df)
+                st.session_state["chat_history"].append(
+                    {"role": "assistant", "content": resp["text"], "table": resp.get("table")}
+                )
+                st.rerun()
+
+    # Render history
+    for msg in st.session_state["chat_history"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg.get("table") is not None and not msg["table"].empty:
+                st.dataframe(msg["table"], use_container_width=True, hide_index=True)
+
+    # Input
+    question = st.chat_input("Ask about your revenue data…")
+    if question:
+        st.session_state["chat_history"].append({"role": "user", "content": question})
+        with st.spinner("Analysing…"):
+            resp = chatbot.answer(question, df)
+        st.session_state["chat_history"].append(
+            {"role": "assistant", "content": resp["text"], "table": resp.get("table")}
+        )
+        st.rerun()
+
+    # Clear button
+    if st.session_state["chat_history"]:
+        if st.button("🗑️ Clear chat", key="clear_chat"):
+            st.session_state["chat_history"] = []
+            st.rerun()
+
+
 # ── Exports tab ─────────────────────────────────────────────────────────────
 def _exports_tab(df: pd.DataFrame, sel: dict) -> None:
     st.subheader("📥 Export Data")
@@ -562,7 +622,8 @@ def main() -> None:
 
     # Session state init
     for key, default in [("df", pd.DataFrame()), ("file_reports", []),
-                          ("auto_load_done", False), ("last_folder", "")]:
+                          ("auto_load_done", False), ("last_folder", ""),
+                          ("chat_history", [])]:
         if key not in st.session_state:
             st.session_state[key] = default
 
@@ -673,14 +734,20 @@ def main() -> None:
             if not sel["hotel"]:
                 st.warning("Select a hotel from the sidebar.")
                 return
-            hotel_dashboard.render(
-                filtered,
-                hotel=sel["hotel"],
-                fc_method=sel["fc_method"],
-                fc_horizon=sel["fc_horizon"],
-            )
+            hotel_df = filtered[filtered["hotel_name"] == sel["hotel"]] \
+                if "hotel_name" in filtered.columns else filtered
+            top_tabs = st.tabs(["🏨 Hotel Dashboard", "💬 Chat"])
+            with top_tabs[0]:
+                hotel_dashboard.render(
+                    filtered,
+                    hotel=sel["hotel"],
+                    fc_method=sel["fc_method"],
+                    fc_horizon=sel["fc_horizon"],
+                )
+            with top_tabs[1]:
+                _chat_tab(hotel_df)
         else:
-            tabs = st.tabs(["📊 Portfolio Dashboard", "📥 Exports"])
+            tabs = st.tabs(["📊 Portfolio Dashboard", "💬 Chat", "📥 Exports"])
             with tabs[0]:
                 portfolio_dashboard.render(
                     filtered,
@@ -688,6 +755,8 @@ def main() -> None:
                     fc_horizon=sel["fc_horizon"],
                 )
             with tabs[1]:
+                _chat_tab(filtered)
+            with tabs[2]:
                 _exports_tab(filtered, sel)
 
     except Exception as e:
