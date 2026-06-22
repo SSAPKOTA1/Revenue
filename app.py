@@ -515,7 +515,8 @@ def _chat_tab(df: pd.DataFrame) -> None:
                 st.session_state["chat_history"].append({"role": "user", "content": ex})
                 resp = chatbot.answer(ex, df)
                 st.session_state["chat_history"].append(
-                    {"role": "assistant", "content": resp["text"], "table": resp.get("table")}
+                    {"role": "assistant", "content": resp["text"],
+                     "table": resp.get("table"), "chart": resp.get("chart")}
                 )
                 st.rerun()
 
@@ -525,6 +526,17 @@ def _chat_tab(df: pd.DataFrame) -> None:
             st.markdown(msg["content"])
             if msg.get("table") is not None and not msg["table"].empty:
                 st.dataframe(msg["table"], use_container_width=True, hide_index=True)
+            if msg.get("chart") is not None:
+                st.plotly_chart(msg["chart"], use_container_width=True)
+                try:
+                    png = chatbot.fig_to_png_bytes(msg["chart"])
+                    st.download_button(
+                        "⬇️ Download Chart (PNG)", data=png,
+                        file_name="chart.png", mime="image/png",
+                        key=f"dl_chart_{id(msg)}",
+                    )
+                except Exception:
+                    pass
 
     # Input
     question = st.chat_input("Ask about your revenue data…")
@@ -533,7 +545,8 @@ def _chat_tab(df: pd.DataFrame) -> None:
         with st.spinner("Analysing…"):
             resp = chatbot.answer(question, df)
         st.session_state["chat_history"].append(
-            {"role": "assistant", "content": resp["text"], "table": resp.get("table")}
+            {"role": "assistant", "content": resp["text"],
+             "table": resp.get("table"), "chart": resp.get("chart")}
         )
         st.rerun()
 
