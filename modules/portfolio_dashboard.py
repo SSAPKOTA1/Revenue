@@ -134,22 +134,24 @@ def tab_overview(df: pd.DataFrame) -> None:
     with c1:
         group_by = st.selectbox("Group by", ["Monthly","Weekly","Quarterly","Yearly"], key="po_groupby")
 
-    agg = kpi_engine.rm_aggregate(
-        kpi_engine.add_period_col(current, "date", group_by),
-        ["period", "period_label"],
-    ).sort_values("period")
-
-    if agg.empty:
-        st.info("No data to display.")
-        return
-
-    # Build prior-year aggregation for side-by-side comparison
+    # Determine current / prior year from the data
     bv_charts = kpi_engine.best_view(df) if snaps else df.copy()
     bv_charts["date"] = pd.to_datetime(bv_charts["date"], errors="coerce")
     bv_charts["year"] = bv_charts["date"].dt.year
     all_yrs    = sorted(bv_charts["year"].dropna().unique().astype(int), reverse=True)
     chart_cur  = all_yrs[0] if all_yrs else None
     chart_prev = all_yrs[1] if len(all_yrs) > 1 else None
+
+    # Always start from the current year — filter before aggregating
+    cur_year_data = bv_charts[bv_charts["year"] == chart_cur] if chart_cur else bv_charts
+    agg = kpi_engine.rm_aggregate(
+        kpi_engine.add_period_col(cur_year_data, "date", group_by),
+        ["period", "period_label"],
+    ).sort_values("period")
+
+    if agg.empty:
+        st.info("No data to display.")
+        return
 
     agg_prev = pd.DataFrame()
     if chart_prev is not None:

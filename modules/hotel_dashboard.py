@@ -210,6 +210,13 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
         st.info("No data in the current snapshot.")
         return
 
+    # Always start from the current year
+    current["date"] = pd.to_datetime(current["date"], errors="coerce")
+    _today_year = pd.Timestamp.today().year
+    _cur_years  = sorted(current["date"].dt.year.dropna().unique().astype(int), reverse=True)
+    _start_year = _cur_years[0] if _cur_years else _today_year
+    current = current[current["date"].dt.year == _start_year]
+
     # Add period and aggregate
     agg = kpi_engine.rm_aggregate(
         kpi_engine.add_period_col(current, "date", group_by),
