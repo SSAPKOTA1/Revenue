@@ -182,40 +182,47 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
     snaps = kpi_engine.get_snapshots(df)
     latest_snap = snaps[-1] if snaps else None
 
-    # Current view = latest snapshot
+    # Base view = latest snapshot
     if latest_snap:
-        current = kpi_engine.latest_snapshot_view(df)
-        st.caption(f"📅 Showing on-books as of **{latest_snap.strftime('%d %b %Y')}** (latest snapshot)")
+        base = kpi_engine.latest_snapshot_view(df)
     else:
-        current = df.copy()
-        st.caption("📅 No snapshots — showing all data combined")
+        base = df.copy()
 
-    _kpi_row(current)
-    st.markdown("---")
+    base["date"] = pd.to_datetime(base["date"], errors="coerce")
+    base["year"] = base["date"].dt.year
+    all_yrs = sorted(base["year"].dropna().unique().astype(int), reverse=True)
 
-    # Controls
-    c1, c2 = st.columns(2)
-    with c1:
+    if not all_yrs:
+        st.info("No data available.")
+        return
+
+    # ── Year selector ─────────────────────────────────────────────────────────
+    c_year, c_group, c_metric = st.columns(3)
+    with c_year:
+        sel_year = st.selectbox("📅 Year", all_yrs, index=0, key="cp_sel_year")
+    with c_group:
         group_by = st.selectbox(
             "Group arrival dates by",
             ["Monthly", "Weekly", "Quarterly", "Yearly", "Daily"],
             key="cp_groupby",
         )
-    with c2:
+    with c_metric:
         available = [m for m in ["rooms_sold", "revenue", "occupancy_pct", "adr", "revpar"]
-                     if m in current.columns]
+                     if m in base.columns]
         metric = st.selectbox("Metric", available, key="cp_metric")
 
-    if current.empty:
-        st.info("No data in the current snapshot.")
-        return
+    # Filter to selected year
+    current = base[base["year"] == sel_year].copy()
 
-    # Always start from the current year
-    current["date"] = pd.to_datetime(current["date"], errors="coerce")
-    _today_year = pd.Timestamp.today().year
-    _cur_years  = sorted(current["date"].dt.year.dropna().unique().astype(int), reverse=True)
-    _start_year = _cur_years[0] if _cur_years else _today_year
-    current = current[current["date"].dt.year == _start_year]
+    snap_label = latest_snap.strftime('%d %b %Y') if latest_snap else "latest"
+    st.caption(f"📅 On-books as of **{snap_label}** — showing **{sel_year}** arrival dates")
+
+    _kpi_row(current)
+    st.markdown("---")
+
+    if current.empty:
+        st.info(f"No data for {sel_year}.")
+        return
 
     # Add period and aggregate
     agg = kpi_engine.rm_aggregate(
@@ -229,7 +236,6 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
 
     metric_label = metric.replace("_", " ").title()
 
-    # Chart: current on-books by arrival period
     fig = go.Figure(go.Bar(
         x=agg["period_label"],
         y=agg[metric],
@@ -239,7 +245,7 @@ def tab_current_position(df: pd.DataFrame, hotel: str) -> None:
         name=metric_label,
     ))
     fig.update_layout(
-        title=f"On-Books {metric_label} by Arrival {group_by} — as of {latest_snap.strftime('%d %b %Y') if latest_snap else 'Latest'}",
+        title=f"On-Books {metric_label} by Arrival {group_by} — {sel_year} (as of {snap_label})",
         xaxis_title=f"Arrival Date ({group_by})",
         yaxis_title=metric_label,
         **_DARK,

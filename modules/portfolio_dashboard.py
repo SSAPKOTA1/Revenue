@@ -121,44 +121,51 @@ def _kpi_row(df: pd.DataFrame) -> None:
 
 def tab_overview(df: pd.DataFrame) -> None:
     snaps = kpi_engine.get_snapshots(df)
-    # best_view: for each (hotel, date) keeps the latest snapshot row
-    # → past years show full-year actuals; current year shows latest on-books
-    current = kpi_engine.best_view(df) if snaps else df.copy()
+    bv_all = kpi_engine.best_view(df) if snaps else df.copy()
+    bv_all["date"] = pd.to_datetime(bv_all["date"], errors="coerce")
+    bv_all["year"] = bv_all["date"].dt.year
+
+    all_yrs = sorted(bv_all["year"].dropna().unique().astype(int), reverse=True)
+    if not all_yrs:
+        st.info("No data to display.")
+        return
+
+    # ── Year selector ─────────────────────────────────────────────────────────
+    ca, cb = st.columns([2, 5])
+    with ca:
+        sel_year = st.selectbox(
+            "📅 Year", all_yrs, index=0, key="po_sel_year",
+        )
+    # Comparison year = previous year in the list
+    prev_idx   = all_yrs.index(sel_year) + 1
+    chart_prev = all_yrs[prev_idx] if prev_idx < len(all_yrs) else None
+
     latest_label = f" (as of {pd.Timestamp(snaps[-1]).strftime('%d %b %Y')})" if snaps else ""
 
-    st.caption(f"Portfolio KPIs{latest_label}")
+    # Filter everything to the selected year
+    current = bv_all[bv_all["year"] == sel_year].copy()
+
+    st.caption(f"Portfolio KPIs — **{sel_year}**{latest_label}")
     _kpi_row(current)
     st.markdown("---")
 
-    c1, _ = st.columns(2)
-    with c1:
-        group_by = st.selectbox("Group by", ["Monthly","Weekly","Quarterly","Yearly"], key="po_groupby")
+    with cb:
+        group_by = st.selectbox("Group by", ["Monthly", "Weekly", "Quarterly", "Yearly"], key="po_groupby")
 
-    # Determine current / prior year from the data
-    bv_charts = kpi_engine.best_view(df) if snaps else df.copy()
-    bv_charts["date"] = pd.to_datetime(bv_charts["date"], errors="coerce")
-    bv_charts["year"] = bv_charts["date"].dt.year
-    all_yrs    = sorted(bv_charts["year"].dropna().unique().astype(int), reverse=True)
-    chart_cur  = all_yrs[0] if all_yrs else None
-    chart_prev = all_yrs[1] if len(all_yrs) > 1 else None
-
-    # Always start from the current year — filter before aggregating
-    cur_year_data = bv_charts[bv_charts["year"] == chart_cur] if chart_cur else bv_charts
     agg = kpi_engine.rm_aggregate(
-        kpi_engine.add_period_col(cur_year_data, "date", group_by),
+        kpi_engine.add_period_col(current, "date", group_by),
         ["period", "period_label"],
     ).sort_values("period")
 
     if agg.empty:
-        st.info("No data to display.")
+        st.info("No data for the selected year.")
         return
 
     agg_prev = pd.DataFrame()
     if chart_prev is not None:
+        prev_data = bv_all[bv_all["year"] == chart_prev]
         agg_prev = kpi_engine.rm_aggregate(
-            kpi_engine.add_period_col(
-                bv_charts[bv_charts["year"] == chart_prev], "date", group_by
-            ),
+            kpi_engine.add_period_col(prev_data, "date", group_by),
             ["period", "period_label"],
         ).sort_values("period")
 
@@ -175,7 +182,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         if metric in agg.columns:
             fig.add_trace(go.Bar(
                 x=agg["period_label"], y=agg[metric],
-                name=str(chart_cur),
+                name=str(sel_year),
                 marker_color=color_cur,
                 text=[fmt_fn(v) for v in agg[metric]],
                 textposition="outside",
@@ -189,7 +196,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         if "occupancy_pct" in agg.columns:
             fig = _side_by_side_bar(
                 "occupancy_pct", lambda v: f"{v:.1f}%",
-                f"Occupancy % by {group_by} — {chart_cur} vs {chart_prev}",
+                f"Occupancy % by {group_by} — {sel_year} vs {chart_prev}",
                 BRAND_COLORS["secondary"], "rgba(148,163,184,0.6)",
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -197,7 +204,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         if "revenue" in agg.columns:
             fig = _side_by_side_bar(
                 "revenue", lambda v: f"€{v/1000:,.0f}k",
-                f"Revenue by {group_by} — {chart_cur} vs {chart_prev}",
+                f"Revenue by {group_by} — {sel_year} vs {chart_prev}",
                 BRAND_COLORS["success"], "rgba(148,163,184,0.6)",
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -207,7 +214,7 @@ def tab_overview(df: pd.DataFrame) -> None:
         if "adr" in agg.columns:
             fig = _side_by_side_bar(
                 "adr", lambda v: f"€{v:,.0f}",
-                f"ADR by {group_by} — {chart_cur} vs {chart_prev}",
+                f"ADR by {group_by} — {sel_year} vs {chart_prev}",
                 BRAND_COLORS["accent"], "rgba(148,163,184,0.6)",
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -215,34 +222,26 @@ def tab_overview(df: pd.DataFrame) -> None:
         if "revpar" in agg.columns:
             fig = _side_by_side_bar(
                 "revpar", lambda v: f"€{v:,.0f}",
-                f"RevPAR by {group_by} — {chart_cur} vs {chart_prev}",
+                f"RevPAR by {group_by} — {sel_year} vs {chart_prev}",
                 BRAND_COLORS["warning"], "rgba(148,163,184,0.6)",
             )
             st.plotly_chart(fig, use_container_width=True)
 
-    # ── Monthly KPI table (always Monthly, regardless of chart grouping) ──────
+    # ── Monthly KPI table ─────────────────────────────────────────────────────
     st.markdown("---")
 
-    bv = kpi_engine.best_view(df) if snaps else df.copy()
-    bv["date"] = pd.to_datetime(bv["date"], errors="coerce")
-    bv["year"]  = bv["date"].dt.year
+    cur_year  = sel_year
+    prev_year = chart_prev if chart_prev else sel_year - 1
+    cy_df     = current  # already filtered to sel_year
+    py_df     = bv_all[bv_all["year"] == prev_year]
+    py_tot    = kpi_engine._kpis_from_df(py_df)
 
-    all_years = sorted(bv["year"].dropna().unique().astype(int), reverse=True)
-    cur_year  = all_years[0]  if all_years else pd.Timestamp.today().year
-    prev_year = all_years[1]  if len(all_years) > 1 else cur_year - 1
-
-    st.markdown(f"#### 📋 {cur_year} Monthly KPIs  ·  vs {prev_year} Full-Year Total")
-
-    # Current year — month by month
-    cy_df = bv[bv["year"] == cur_year].copy()
     monthly = kpi_engine.rm_aggregate(
         kpi_engine.add_period_col(cy_df, "date", "Monthly"),
         ["period", "period_label"],
     ).sort_values("period")
 
-    # Prior year — single total row
-    py_df  = bv[bv["year"] == prev_year].copy()
-    py_tot = kpi_engine._kpis_from_df(py_df)
+    st.markdown(f"#### 📋 {cur_year} Monthly KPIs  ·  vs {prev_year} Full-Year Total")
 
     def _f(v, kind):
         if v is None or (isinstance(v, float) and np.isnan(v)):
