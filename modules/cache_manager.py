@@ -424,3 +424,57 @@ def clear_cache() -> None:
         if f.exists():
             f.unlink()
     logger.info("SQLite cache cleared")
+
+
+def list_loaded_files() -> list[dict]:
+    """Return all files currently tracked in the scanned_files table."""
+    if not SQLITE_FILE.exists():
+        return []
+    try:
+        with _get_conn() as con:
+            rows = con.execute(
+                f"SELECT filepath, rows, loaded_at FROM {_FILES_TABLE} ORDER BY loaded_at DESC"
+            ).fetchall()
+        return [
+            {
+                "filepath":  fp,
+                "filename":  Path(fp).name,
+                "folder":    str(Path(fp).parent),
+                "rows":      r or 0,
+                "loaded_at": (la or "")[:10],
+            }
+            for fp, r, la in rows
+        ]
+    except Exception as e:
+        logger.error("list_loaded_files failed: %s", e)
+        return []
+
+
+def remove_file(filepath: str) -> int:
+    """
+    Remove all data for one file from the cache without a full rebuild.
+    Deletes rows from master and the entry from scanned_files.
+    Returns the number of master rows deleted.
+    """
+    if not SQLITE_FILE.exists():
+        return 0
+    try:
+        with _get_conn() as con:
+            result = con.execute(
+                f"DELETE FROM {_TABLE} WHERE _source_file = ?", (filepath,)
+            )
+            deleted = result.rowcount
+            con.execute(
+                f"DELETE FROM {_FILES_TABLE} WHERE filepath = ?", (filepath,)
+            )
+            con.commit()
+            try:
+                meta = json.loads(CACHE_META_FILE.read_text(encoding="utf-8"))
+                _update_meta(con, meta.get("source_folder", ""))
+            except Exception:
+                pass
+        logger.info("remove_file: deleted %d rows for '%s'", deleted, filepath)
+        return deleted
+    except Exception as e:
+        logger.error("remove_file failed: %s", e)
+        return 0
